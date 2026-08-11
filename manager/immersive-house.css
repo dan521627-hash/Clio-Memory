@@ -1,0 +1,903 @@
+:root {
+  --house-paper: #f5ead3;
+  --house-paper-strong: #ead6b4;
+  --house-ink: #403a2d;
+  --house-muted: #766d5c;
+  --house-olive: #4f6032;
+  --house-olive-dark: #344321;
+  --house-terracotta: #ae5d45;
+  --house-line: rgba(91, 72, 49, .22);
+}
+
+html { background: #d8c6a5; }
+body {
+  color: var(--house-ink);
+  background: #e7d7ba;
+}
+
+.demo-banner { display: none !important; }
+
+/* The opening is a real front door, not a loading dashboard. */
+.manager-opening {
+  align-items: start;
+  padding-top: clamp(52px, 8vh, 110px);
+  background-color: #ead7b5;
+  background-image: url("assets/clio-athenian-door.png");
+  background-position: center top;
+  background-repeat: no-repeat;
+  background-size: min(100vw, 853px) auto;
+}
+.manager-opening::before,
+.manager-opening::after { display: none; }
+.opening-brand { width: min(480px, calc(100vw - 42px)); }
+.opening-symbol,
+.opening-rule,
+.opening-pulse { display: none; }
+.opening-brand > strong {
+  color: #3f3c2c;
+  font-family: Georgia, "Times New Roman", "Noto Serif SC", serif;
+  font-size: clamp(48px, 9vw, 76px);
+  font-weight: 400;
+}
+.opening-brand p {
+  margin-top: 8px;
+  color: #685f4b;
+  font-family: "Noto Serif SC", "Microsoft YaHei", serif;
+  font-size: 14px;
+}
+.manager-opening.is-hidden {
+  opacity: 0;
+  transform: scale(1.035);
+  transition: opacity .55s ease, transform .72s ease, visibility .55s ease;
+}
+
+/* Login is the closed entrance of the same house. */
+.manager-login {
+  position: fixed;
+  inset: 0;
+  z-index: 1100;
+  display: block;
+  overflow: hidden;
+  background-color: #ead7b5;
+  background-image: url("assets/clio-athenian-door.png");
+  background-position: center top;
+  background-repeat: no-repeat;
+  background-size: min(100vw, 853px) auto;
+  transition: opacity .68s ease, transform .72s ease;
+}
+.manager-login[hidden] { display: none; }
+.manager-login.is-entering {
+  opacity: 0;
+  transform: scale(1.08);
+  pointer-events: none;
+}
+.login-house-art {
+  position: absolute;
+  top: clamp(44px, 7vh, 96px);
+  left: 50%;
+  width: min(620px, calc(100vw - 38px));
+  min-height: 0;
+  display: block;
+  padding: 0;
+  color: #3f3a2d;
+  text-align: center;
+  background: transparent;
+  box-shadow: none;
+  transform: translateX(-50%);
+}
+.login-house-art::before { display: none; }
+.login-house-art span {
+  display: block;
+  color: #776f5c;
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: 9px;
+  letter-spacing: 2px;
+}
+.login-house-art strong {
+  display: block;
+  margin-top: 12px;
+  color: #403b2d;
+  font-family: "Noto Serif SC", "Songti SC", Georgia, serif;
+  font-size: clamp(27px, 5vw, 42px);
+  font-weight: 500;
+  line-height: 1.45;
+}
+.manager-login-panel {
+  position: absolute;
+  left: 50%;
+  bottom: clamp(34px, 6vh, 78px);
+  width: min(360px, calc(100vw - 34px));
+  min-height: 0;
+  display: block;
+  padding: 18px 18px 16px;
+  color: var(--house-ink);
+  background: rgba(250, 239, 216, .94);
+  border: 1px solid rgba(105, 77, 49, .28);
+  border-radius: 6px;
+  box-shadow: 0 18px 46px rgba(67, 49, 30, .18);
+  transform: translateX(-50%);
+}
+.login-brand,
+.login-kicker,
+.login-copy,
+.login-safety { display: none; }
+.manager-login-panel h1 {
+  margin: 0 0 14px;
+  color: #49422f;
+  font-family: "Noto Serif SC", "Songti SC", serif;
+  font-size: 20px;
+  font-weight: 500;
+  text-align: center;
+}
+.login-password { margin: 0; }
+.login-password > span {
+  color: #72654e;
+  font-size: 10px;
+}
+.login-password input {
+  height: 46px;
+  margin-top: 6px;
+  padding: 0 13px;
+  color: #433b2b;
+  background: rgba(255, 250, 239, .88);
+  border: 1px solid rgba(91, 74, 51, .28);
+  border-radius: 4px;
+}
+.login-enter {
+  width: 100%;
+  height: 46px;
+  margin-top: 10px;
+  color: #fff4d5;
+  background: var(--house-olive);
+  border: 0;
+  border-radius: 4px;
+}
+.manager-login-error {
+  min-height: 18px;
+  margin-top: 8px;
+  color: #914332;
+  font-size: 10px;
+  text-align: center;
+}
+
+/* The house is the interface. The rooms themselves are the buttons. */
+body.viewing-house {
+  min-height: 100%;
+  padding: 0 0 86px;
+  background: #d6c39f;
+}
+body.viewing-house .manager-topbar { display: none; }
+.memory-house {
+  width: 100%;
+  min-height: 100vh;
+  margin: 0;
+  padding: 0;
+  background: #d6c39f;
+}
+.house-scene {
+  position: relative;
+  width: min(100%, 853px);
+  min-height: 0;
+  aspect-ratio: 853 / 1844;
+  margin: 0 auto;
+  overflow: hidden;
+  background-color: #ead9ba;
+  background-image: url("assets/clio-athenian-house.jpg");
+  background-position: center top;
+  background-repeat: no-repeat;
+  background-size: 100% 100%;
+  box-shadow: 0 18px 55px rgba(66, 49, 30, .18);
+}
+.house-scene::before { display: none; }
+.house-heading {
+  position: absolute;
+  z-index: 3;
+  top: 2.2%;
+  left: 7%;
+  width: 86%;
+  color: #403c2d;
+  text-align: center;
+  text-shadow: 0 1px rgba(255, 248, 224, .7);
+}
+.house-heading small {
+  color: #79715f;
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: clamp(7px, 1.5vw, 11px);
+  letter-spacing: 2px;
+}
+.house-heading h1 {
+  margin: .4% 0 0;
+  color: #38382b;
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: clamp(46px, 10vw, 78px);
+  font-weight: 400;
+  line-height: 1;
+}
+.house-heading > strong {
+  display: block;
+  margin-top: .8%;
+  font-family: "Noto Serif SC", "Songti SC", serif;
+  font-size: clamp(22px, 4.4vw, 35px);
+  font-weight: 500;
+}
+.house-promise {
+  margin: 1.2% 0 0;
+  color: #625d4c;
+  font-family: "Noto Serif SC", "Microsoft YaHei", serif;
+  font-size: clamp(11px, 2.2vw, 16px);
+}
+#houseGreeting {
+  display: none;
+}
+
+.emotion-ticket {
+  position: absolute;
+  z-index: 5;
+  top: 13.3%;
+  left: 50%;
+  width: auto;
+  min-height: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  padding: 0;
+  color: #815742;
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+  transform: translateX(-50%);
+}
+.emotion-ticket span { color: #846f5c; font-size: clamp(8px, 1.8vw, 12px); }
+.emotion-ticket span svg { width: 13px; }
+.emotion-ticket strong { font-size: clamp(11px, 2.2vw, 16px); }
+.emotion-ticket b { color: var(--house-terracotta); font-family: Georgia, serif; font-size: clamp(15px, 3.2vw, 23px); }
+.emotion-ticket small { display: none; }
+
+.push-acknowledgement {
+  position: absolute;
+  z-index: 8;
+  top: 16.2%;
+  left: 50%;
+  width: min(76%, 560px);
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 9px 11px;
+  color: #5d4d3b;
+  background: rgba(248, 233, 207, .92);
+  border: 1px solid rgba(116, 77, 46, .3);
+  border-radius: 5px;
+  box-shadow: 0 8px 24px rgba(79, 52, 31, .13);
+  transform: translateX(-50%);
+}
+.push-acknowledgement > div { display: flex; align-items: center; gap: 8px; }
+.push-acknowledgement svg { width: 16px; color: var(--house-terracotta); }
+.push-acknowledgement strong { font-size: clamp(9px, 2vw, 13px); }
+.push-acknowledgement small { display: block; margin-top: 2px; color: #81715e; font-size: 8px; }
+.push-acknowledgement button {
+  flex: 0 0 auto;
+  min-height: 34px;
+  padding: 0 10px;
+  color: #fff4dd;
+  background: var(--house-terracotta);
+  border: 0;
+  border-radius: 4px;
+  font-size: 9px;
+}
+
+.house-room {
+  position: absolute;
+  z-index: 4;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  gap: 3px;
+  padding: 8px 13px;
+  color: #f6e8bc;
+  text-align: left;
+  background: rgba(55, 72, 35, .92);
+  border: 1px solid rgba(236, 214, 157, .78);
+  outline: 2px solid rgba(54, 67, 36, .75);
+  outline-offset: 2px;
+  border-radius: 3px;
+  box-shadow: 0 7px 14px rgba(61, 43, 26, .15);
+  transition: transform .18s ease, background-color .18s ease;
+}
+.house-room:hover,
+.house-room:focus-visible {
+  color: #fff4cf;
+  background: rgba(48, 65, 29, .97);
+  transform: translateY(-2px);
+}
+.house-room > span { display: flex; align-items: center; gap: 7px; }
+.house-room svg { width: clamp(15px, 3vw, 22px); }
+.house-room strong {
+  color: inherit;
+  font-family: "Noto Serif SC", "Songti SC", serif;
+  font-size: clamp(14px, 3.2vw, 24px);
+  font-weight: 500;
+  white-space: nowrap;
+}
+.house-room small {
+  color: rgba(246, 232, 188, .72);
+  font-size: clamp(7px, 1.55vw, 11px);
+  white-space: nowrap;
+}
+.room-study { top: 27.5%; left: 10%; width: 28%; height: 6.2%; }
+.room-mailbox { top: 28.7%; right: 9%; width: 25%; height: 6%; }
+.room-thoughts { top: 69.6%; left: 7.5%; width: 29%; height: 6.2%; }
+.room-resonance { top: 69.6%; right: 6.2%; width: 35%; height: 6.2%; }
+.room-today {
+  top: 47%;
+  left: 36%;
+  width: 28%;
+  height: 7%;
+  align-items: center;
+  color: #4c4b37;
+  text-align: center;
+  background: transparent;
+  border: 0;
+  outline: 0;
+  box-shadow: none;
+}
+.room-today:hover,
+.room-today:focus-visible { color: #353c25; background: transparent; transform: scale(1.03); }
+.room-today small { color: #706b57; }
+.room-tasks {
+  top: 68.2%;
+  left: 39%;
+  width: 22%;
+  height: 5.2%;
+  align-items: center;
+  color: #5b4c38;
+  text-align: center;
+  background: rgba(224, 199, 158, .9);
+  border-color: rgba(112, 76, 45, .34);
+  outline-color: rgba(172, 132, 81, .4);
+}
+.room-tasks:hover,
+.room-tasks:focus-visible { color: #433725; background: rgba(235, 213, 175, .95); }
+.room-tasks small { display: none; }
+
+.house-darkflow-link {
+  position: absolute;
+  z-index: 7;
+  left: 50%;
+  bottom: 5.2%;
+  min-height: 0;
+  padding: 8px 16px;
+  color: #f2e6de;
+  background: rgba(74, 47, 65, .9);
+  border: 1px solid rgba(241, 220, 228, .35);
+  border-radius: 4px;
+  box-shadow: none;
+  transform: translateX(-50%);
+}
+
+/* Navigation is a quiet threshold at the bottom, not another panel of tasks. */
+.manager-navigation {
+  position: fixed;
+  z-index: 85;
+  inset: auto auto 8px 50% !important;
+  width: min(560px, calc(100% - 16px));
+  min-height: 62px;
+  height: auto !important;
+  padding: 4px;
+  overflow: visible !important;
+  background: rgba(250, 241, 222, .94);
+  border: 1px solid rgba(101, 78, 51, .24);
+  border-radius: 6px;
+  box-shadow: 0 10px 30px rgba(65, 48, 31, .16);
+  backdrop-filter: blur(12px);
+  transform: translateX(-50%);
+}
+.daily-navigation { grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 2px; }
+.daily-nav-button {
+  height: 54px;
+  color: #665f50;
+  background: transparent;
+  border: 0;
+  border-radius: 4px;
+}
+.daily-nav-button.is-active { color: #fff5d7; background: var(--house-olive); }
+.daily-nav-button svg { width: 20px; }
+
+/* Room pages read like paper, letters and ledgers instead of nested cards. */
+body.viewing-room {
+  padding: 78px 0 86px;
+  background-color: #e8d9bc;
+  background-image: url("assets/clio-athenian-house.jpg");
+  background-position: center top;
+  background-repeat: no-repeat;
+  background-size: min(100vw, 853px) auto;
+  background-attachment: fixed;
+}
+.manager-topbar {
+  position: fixed;
+  z-index: 70;
+  top: 0;
+  left: 50%;
+  width: min(920px, 100%);
+  height: 66px;
+  padding: 0 18px;
+  color: #4b4435;
+  background: rgba(247, 236, 213, .92);
+  border: 0;
+  border-bottom: 1px solid var(--house-line);
+  border-radius: 0;
+  box-shadow: none;
+  backdrop-filter: blur(12px);
+  transform: translateX(-50%);
+}
+.manager-logo { color: #fff3d1; background: var(--house-terracotta); border-radius: 4px; }
+.manager-address { display: none; }
+.manager-shell {
+  width: min(920px, calc(100% - 20px));
+  min-height: calc(100vh - 168px);
+  margin: 0 auto;
+  padding: 0;
+  overflow: hidden;
+  background: rgba(250, 241, 222, .95);
+  border: 1px solid rgba(98, 75, 49, .2);
+  border-radius: 6px;
+  box-shadow: 0 18px 52px rgba(68, 49, 29, .15);
+}
+.manager-shell > main,
+.gentle-view {
+  width: 100%;
+  min-height: calc(100vh - 168px);
+  margin: 0;
+  padding: 24px clamp(16px, 4vw, 36px) 42px;
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+}
+.memory-toolbar,
+.view-toolbar {
+  min-height: 86px;
+  padding: 0 0 20px;
+  background: transparent;
+  border: 0;
+  border-bottom: 1px solid var(--house-line);
+}
+.memory-toolbar h1,
+.gentle-toolbar h1 {
+  font-family: "Noto Serif SC", "Songti SC", Georgia, serif;
+  font-size: clamp(28px, 5vw, 42px);
+  font-weight: 500;
+}
+.memory-toolbar .eyebrow::after { content: " · 写下的事，都在这里安静放着"; }
+.mailbox-toolbar .eyebrow::after { content: " · 有些话，留给下一个醒来的窗口"; }
+.task-toolbar .eyebrow::after { content: " · 还没做完的事，会在这里等你回来"; }
+.mind-main .eyebrow::after { content: " · 没说出口的念头，也有自己的去处"; }
+.resonance-main .eyebrow::after { content: " · 想起什么，往往不是偶然"; }
+.calendar-main .eyebrow::after { content: " · 今天发生的事，正在这里落下痕迹"; }
+
+.memory-main .stats-band,
+.topic-summary { display: none; }
+.filter-nav,
+.soft-segments,
+.topic-quick-links {
+  display: flex;
+  gap: 4px;
+  overflow-x: auto;
+  padding: 13px 0 9px;
+  background: transparent;
+  border: 0;
+  border-bottom: 1px solid var(--house-line);
+}
+.filter-item,
+.soft-segments button,
+.topic-quick-links button {
+  flex: 0 0 auto;
+  min-width: auto;
+  height: 36px;
+  padding: 0 10px;
+  color: #756a56;
+  background: transparent;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+}
+.filter-item.is-active,
+.soft-segments button.is-active,
+.topic-quick-links button.is-active {
+  color: var(--house-olive-dark);
+  background: transparent;
+  border-bottom-color: var(--house-olive);
+  box-shadow: none;
+}
+.filter-item b { background: transparent; }
+
+.memory-workspace { gap: 0; margin-top: 0; }
+.bucket-pane,
+.detail-pane,
+.mailbox-intro,
+.task-intro,
+.privacy-ribbon,
+.resonance-band,
+.tension-band,
+.discovery-results,
+.calendar-day-heading {
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+}
+.pane-heading { padding: 15px 4px 10px; border-bottom: 1px solid var(--house-line); }
+.bucket-list { background: transparent; }
+.bucket-item {
+  min-height: 72px;
+  padding: 13px 7px;
+  background: transparent;
+  border: 0;
+  border-bottom: 1px solid var(--house-line);
+  border-radius: 0;
+  box-shadow: none;
+}
+.bucket-item:hover,
+.bucket-item.is-selected { background: rgba(98, 112, 63, .08); }
+.detail-pane { border-left: 1px solid var(--house-line); }
+
+.mailbox-entry,
+.task-entry,
+.thought-entry,
+.calendar-entry,
+.discovery-result,
+.timeline-fact,
+.topic-main-item,
+.topic-sub-item {
+  min-height: 0;
+  background: transparent;
+  border: 0;
+  border-bottom: 1px solid var(--house-line);
+  border-radius: 0;
+  box-shadow: none;
+}
+.thought-entry { padding: 20px 6px; }
+.thought-entry footer { border-top: 1px solid var(--house-line); }
+.calendar-entry,
+.discovery-result { padding: 15px 6px; }
+.mailbox-entry,
+.task-entry { padding: 18px 6px; }
+.mailbox-entry.is-latest { background: rgba(174, 93, 69, .05); }
+.discovery-result:hover,
+.timeline-fact > summary:hover { background: rgba(98, 112, 63, .06); }
+.discovery-results { overflow: visible; }
+
+.primary-button { background: var(--house-olive); border-radius: 4px; }
+.secondary-button,
+.icon-button { background: transparent; border-color: var(--house-line); border-radius: 4px; }
+dialog { background: #f8edd7; border-radius: 6px; }
+
+@media (max-width: 760px) {
+  .manager-opening,
+  .manager-login { background-size: 100% auto; }
+  .login-house-art { top: 5.5vh; }
+  .manager-login-panel { bottom: max(22px, env(safe-area-inset-bottom)); }
+  .house-scene { width: 100%; box-shadow: none; }
+  .house-room { padding: 5px 8px; }
+  .house-room small { display: none; }
+  .room-study { left: 8%; width: 31%; }
+  .room-mailbox { right: 7%; width: 27%; }
+  .room-thoughts { left: 6.5%; width: 31%; }
+  .room-resonance { right: 4.8%; width: 37%; }
+  .room-tasks { left: 38%; width: 24%; }
+  .push-acknowledgement { top: 15.9%; width: 82%; }
+  body.viewing-room { padding-top: 66px; background-size: 100% auto; }
+  .manager-topbar { height: 58px; padding: 0 12px; }
+  .manager-brand small { display: none; }
+  .service-live { font-size: 9px; }
+  .manager-shell { width: 100%; min-height: calc(100vh - 138px); border: 0; border-radius: 0; box-shadow: none; }
+  .manager-shell > main,
+  .gentle-view { min-height: calc(100vh - 138px); padding: 19px 14px 34px; }
+  .memory-toolbar { grid-template-columns: minmax(0, 1fr) auto; gap: 10px; }
+  .memory-toolbar .search-box { grid-column: 1 / -1; grid-row: auto; width: 100%; }
+  .memory-workspace { display: block; }
+  .detail-pane { border-left: 0; }
+  .topic-grid,
+  .thought-list,
+  .tension-grid { grid-template-columns: 1fr; }
+  .advanced-menu-panel { bottom: 78px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .manager-login,
+  .manager-opening,
+  .house-room { transition: none; }
+}
+
+/* Approved house v2: the illustration is the interface, not a dashboard skin. */
+body.viewing-house {
+  min-height: 100%;
+  padding: 0;
+  background: #d7c59d;
+}
+
+body.viewing-house .memory-house {
+  min-height: 100svh;
+  background: #d7c59d;
+}
+
+.house-v2 {
+  width: min(100%, 853px);
+  min-height: 0;
+  aspect-ratio: 853 / 1844;
+  background: #d6c29b url("assets/clio-athenian-house.jpg") center top / 100% 100% no-repeat;
+}
+
+.house-v2 .house-heading {
+  top: 2.7%;
+  left: 12%;
+  width: 76%;
+  color: #403d2e;
+  text-align: center;
+}
+
+.house-v2 .house-heading small {
+  color: #82745f;
+  font-size: clamp(7px, 1.45vw, 11px);
+  letter-spacing: 2px;
+}
+
+.house-v2 .house-heading h1 {
+  margin: 3px 0 0;
+  font: 400 clamp(43px, 9vw, 72px)/.95 Georgia, "Times New Roman", serif;
+}
+
+.house-v2 .house-heading > strong {
+  margin-top: 5px;
+  font-size: clamp(20px, 4.5vw, 35px);
+}
+
+.house-v2 .house-promise {
+  width: 100%;
+  margin: 8px auto 0;
+  color: #625d4c;
+  font-size: clamp(10px, 2vw, 15px);
+  line-height: 1.5;
+}
+
+.house-v2 .house-room,
+.house-v2 .emotion-ticket {
+  position: absolute;
+  z-index: 4;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  padding: 2px 4px;
+  color: #3f4930;
+  text-align: center;
+  background: transparent;
+  border: 0;
+  outline: 0;
+  border-radius: 0;
+  box-shadow: none;
+  text-shadow: 0 1px 0 rgba(255, 242, 210, .9), 0 2px 8px rgba(67, 48, 28, .22);
+  transform: none;
+  transition: transform .18s ease, filter .18s ease;
+}
+
+.house-v2 .house-room:hover,
+.house-v2 .house-room:focus-visible,
+.house-v2 .emotion-ticket:hover,
+.house-v2 .emotion-ticket:focus-visible {
+  color: #a95f43;
+  background: transparent;
+  transform: translateY(-1px);
+}
+
+.house-v2 .house-room > span {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+}
+
+.house-v2 .house-room > span svg,
+.house-v2 .house-room small,
+.house-v2 .emotion-ticket > span,
+.house-v2 .emotion-ticket > small {
+  display: none;
+}
+
+.house-v2 .house-room strong {
+  color: inherit;
+  font-family: "Noto Serif SC", "Songti SC", "Microsoft YaHei", serif;
+  font-size: inherit;
+  font-weight: 650;
+  line-height: 1.15;
+  white-space: nowrap;
+}
+
+.house-v2 .room-study {
+  top: 28.6%;
+  left: 15%;
+  width: 21%;
+  height: 3.4%;
+  color: #563d28;
+  font-size: clamp(14px, 3vw, 19px);
+  text-shadow: 0 1px 0 rgba(255, 238, 202, .55);
+}
+
+.house-v2 .room-mailbox {
+  top: 28.1%;
+  right: 15%;
+  width: 18%;
+  height: 3.2%;
+  color: #583e2a;
+  font-size: clamp(15px, 3.1vw, 19px);
+  text-shadow: 0 1px 0 rgba(255, 236, 198, .62);
+}
+
+.house-v2 .room-thoughts {
+  top: 72.8%;
+  left: 5%;
+  width: 24%;
+  height: 3.4%;
+  color: #f0d9a4;
+  font-size: clamp(15px, 3vw, 19px);
+  text-shadow: 0 2px 7px rgba(45, 29, 21, .9);
+}
+
+.house-v2 .room-resonance {
+  top: 72.8%;
+  right: 3%;
+  width: 36%;
+  height: 3.6%;
+  color: #f0d69d;
+  font-size: clamp(14px, 2.8vw, 18px);
+  line-height: 1.15;
+  text-shadow: 0 2px 7px rgba(44, 34, 26, .9);
+}
+
+.house-v2 .room-tasks {
+  top: 68.9%;
+  left: 38%;
+  width: 24%;
+  height: 3.6%;
+  color: #5c432d;
+  font-size: clamp(15px, 3vw, 19px);
+  text-shadow: 0 1px 0 rgba(255, 237, 204, .72);
+}
+
+.house-v2 .room-today {
+  display: none;
+}
+
+.house-v2 .emotion-ticket {
+  top: 48.2%;
+  left: 39%;
+  width: 22%;
+  height: 6.8%;
+  flex-direction: column;
+  gap: 1px;
+  color: #494735;
+  white-space: normal;
+}
+
+.house-v2 .emotion-ticket strong {
+  display: block;
+  max-width: 100%;
+  color: inherit;
+  font-family: "Noto Serif SC", "Songti SC", "Microsoft YaHei", serif;
+  font-size: clamp(15px, 3.6vw, 22px);
+  font-weight: 600;
+  line-height: 1.22;
+}
+
+.house-v2 .emotion-ticket b {
+  color: #a95f43;
+  font: 500 clamp(17px, 3.8vw, 28px)/1 Georgia, "Times New Roman", serif;
+}
+
+.house-v2 .push-acknowledgement {
+  z-index: 8;
+  top: 76.3%;
+  left: 50%;
+  width: min(52%, 400px);
+  min-height: 0;
+  padding: 8px 10px;
+  color: #5d4d3b;
+  background: rgba(248, 233, 207, .94);
+  border: 1px solid rgba(116, 77, 46, .3);
+  border-radius: 2px;
+  box-shadow: 0 7px 18px rgba(60, 41, 23, .16);
+}
+
+.house-v2 .push-acknowledgement strong {
+  font-size: clamp(8px, 1.8vw, 12px);
+}
+
+.house-v2 .push-acknowledgement small {
+  font-size: clamp(7px, 1.45vw, 10px);
+}
+
+.house-v2 .push-acknowledgement button {
+  min-height: 30px;
+  padding: 0 8px;
+  background: #a95f43;
+  border-radius: 2px;
+}
+
+.house-v2 .house-darkflow-link {
+  bottom: 8.8%;
+  padding: 6px 12px;
+  color: #f2e6de;
+  background: rgba(74, 47, 65, .86);
+  border-radius: 2px;
+  font-size: clamp(8px, 1.7vw, 12px);
+}
+
+body.viewing-house .manager-navigation {
+  inset: auto auto max(8px, env(safe-area-inset-bottom)) 50% !important;
+  width: min(820px, calc(100% - 18px));
+  min-height: 0;
+  height: clamp(62px, 8svh, 82px) !important;
+  padding: 0 3%;
+  background: rgba(249, 236, 209, .94);
+  border: 1px solid rgba(111, 80, 45, .3);
+  border-radius: 2px;
+  box-shadow: 0 8px 22px rgba(58, 40, 24, .12);
+}
+
+body.viewing-house .daily-navigation {
+  height: 100%;
+  gap: 0;
+}
+
+body.viewing-house .daily-nav-button {
+  height: 100%;
+  color: #5f5846;
+  background: transparent;
+  border-left: 1px solid rgba(104, 79, 51, .12);
+  border-radius: 0;
+}
+
+body.viewing-house .daily-nav-button:first-child {
+  border-left: 0;
+}
+
+body.viewing-house .daily-nav-button.is-active {
+  color: #354523;
+  background: transparent;
+}
+
+body.viewing-house .daily-nav-button svg {
+  width: clamp(18px, 4vw, 29px);
+}
+
+.advanced-menu-panel .settings-logout {
+  margin-top: 10px;
+  color: #8b4638;
+  border-top: 1px solid rgba(139, 70, 56, .24);
+}
+
+@media (max-width: 520px) {
+  .house-v2 {
+    width: 100vw;
+    height: 100svh;
+    aspect-ratio: auto;
+    box-shadow: none;
+  }
+
+  .house-v2 .house-room,
+  .house-v2 .emotion-ticket {
+    padding: 1px 2px;
+  }
+
+  .house-v2 .house-heading p {
+    width: 110%;
+    margin-left: -5%;
+  }
+
+  .house-v2 .push-acknowledgement {
+    width: 60%;
+  }
+}

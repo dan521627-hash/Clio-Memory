@@ -1,0 +1,68 @@
+services:
+  clio-memory:
+    build: .
+    image: clio-memory:latest
+    container_name: clio-memory
+    restart: always
+    ports:
+      - "127.0.0.1:18001:8000"
+    environment:
+      OMBRE_API_KEY: ${OMBRE_API_KEY:-}
+      OMBRE_RESPONSE_SEAL: ${OMBRE_RESPONSE_SEAL}
+      OMBRE_DIAGNOSTIC_LOG: /data/logs/mcp_requests.log
+      OMBRE_TRANSPORT: streamable-http
+      OMBRE_BUCKETS_DIR: /data
+      OMBRE_EMBEDDING_DB: /data/embeddings.sqlite3
+      OMBRE_SUMMARY_CACHE_DB: /data/summaries.sqlite3
+      OMBRE_HISTORY_DB: /data/history.sqlite3
+      OMBRE_FACT_TIMELINE_DB: /data/fact_timeline.sqlite3
+      OMBRE_RELATIONS_DB: /data/relations.sqlite3
+      OMBRE_RETRIEVAL_FEEDBACK_DB: /data/retrieval_feedback.sqlite3
+      OMBRE_TREASURY_DB: /data/treasury.sqlite3
+      OMBRE_TASKS_DB: /data/tasks.sqlite3
+      OMBRE_XINCHAO_DB: /data/xinchao.sqlite3
+      OMBRE_BEHAVIOR_DB: /data/behavior.sqlite3
+      OMBRE_TOPICS_DB: /data/topics.sqlite3
+      OMBRE_BARK_BASE_URL: ${OMBRE_BARK_BASE_URL:-https://api.day.app}
+      OMBRE_BARK_DEVICE_KEY: ${OMBRE_BARK_DEVICE_KEY:-}
+      OMBRE_EMBEDDING_CACHE_DIR: /models
+    volumes:
+      - ${CLIO_DATA_DIR:-./data}:/data
+      - ${CLIO_MODEL_DIR:-./models}:/models
+      - ./config.yaml:/app/config.yaml:ro
+
+  clio-manager:
+    build:
+      context: .
+      dockerfile: Dockerfile.manager
+    image: clio-memory-manager:latest
+    container_name: clio-memory-manager
+    restart: always
+    ports:
+      - "127.0.0.1:8787:8787"
+    environment:
+      OMBRE_API_KEY: ${OMBRE_API_KEY:-}
+      CLIO_MANAGER_PASSWORD: ${CLIO_MANAGER_PASSWORD}
+      OMBRE_BUCKETS_DIR: /data
+      OMBRE_EMBEDDING_DB: /data/embeddings.sqlite3
+      OMBRE_SUMMARY_CACHE_DB: /data/summaries.sqlite3
+      OMBRE_HISTORY_DB: /data/history.sqlite3
+      OMBRE_FACT_TIMELINE_DB: /data/fact_timeline.sqlite3
+      OMBRE_RELATIONS_DB: /data/relations.sqlite3
+      OMBRE_RETRIEVAL_FEEDBACK_DB: /data/retrieval_feedback.sqlite3
+      OMBRE_TREASURY_DB: /data/treasury.sqlite3
+      OMBRE_TASKS_DB: /data/tasks.sqlite3
+      OMBRE_XINCHAO_DB: /data/xinchao.sqlite3
+      OMBRE_BEHAVIOR_DB: /data/behavior.sqlite3
+      OMBRE_TOPICS_DB: /data/topics.sqlite3
+      OMBRE_BARK_BASE_URL: ${OMBRE_BARK_BASE_URL:-https://api.day.app}
+      OMBRE_BARK_DEVICE_KEY: ${OMBRE_BARK_DEVICE_KEY:-}
+      OMBRE_EMBEDDING_CACHE_DIR: /models
+      CLIO_EXPORT_DIR: /exports
+    volumes:
+      - ${CLIO_DATA_DIR:-./data}:/data
+      - ${CLIO_MODEL_DIR:-./models}:/models
+      - ${CLIO_EXPORT_DIR:-./exports}:/exports
+      - ./config.yaml:/app/config.yaml:ro
+    depends_on:
+      - clio-memory

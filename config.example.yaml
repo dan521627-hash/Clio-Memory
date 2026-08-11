@@ -1,0 +1,276 @@
+# ============================================================
+# Ombre Brain Configuration / 配置文件
+# Copy this file to config.yaml and modify as needed
+# 复制此文件为 config.yaml 后按需修改
+# ============================================================
+
+# --- Transport / 传输方式 ---
+# stdio: local use (Claude Desktop, direct pipe)
+# streamable-http: remote use (HTTP, tunnel/CDN/proxy friendly)
+# stdio: 本地使用（Claude Desktop，直接管道通信）
+# streamable-http: 远程使用（标准 HTTP，对隧道/CDN/代理友好）
+transport: "stdio"
+
+# --- Log level / 日志级别 ---
+log_level: "INFO"
+
+# --- Bucket storage path / 记忆桶存储路径 ---
+# Point this to your Obsidian vault subdirectory, or any local folder
+# 指向你的 Obsidian 仓库子目录，或任意本地文件夹
+# Leave as-is to use the built-in ./buckets/ directory
+# 保持默认则使用内置的 ./buckets/ 目录
+# buckets_dir: "/path/to/your/Obsidian Vault/Ombre Brain"
+
+# --- Dehydration API / 脱水压缩 API 配置 ---
+# Uses a cheap LLM for intelligent compression; auto-degrades to local
+# keyword extraction if API is unavailable
+# 用廉价 LLM 做智能压缩，API 不可用时自动降级到本地关键词提取
+dehydration:
+  # Supports any OpenAI-compatible API: DeepSeek / Ollama / LM Studio / vLLM / Gemini etc.
+  # 支持所有 OpenAI 兼容 API：DeepSeek / Ollama / LM Studio / vLLM / Gemini 等
+  model: "deepseek-chat"
+  base_url: "https://api.deepseek.com/v1"
+  # Common base_url examples / 常见 base_url 示例：
+  #   DeepSeek:    https://api.deepseek.com/v1
+  #   SiliconFlow: https://api.siliconflow.cn/v1
+  #   Ollama:      http://localhost:11434/v1
+  #   LM Studio:   http://localhost:1234/v1
+  #   vLLM:        http://localhost:8000/v1
+  #   Gemini:      https://generativelanguage.googleapis.com/v1beta/openai
+  # api_key: ""    # ⚠️ Use env var OMBRE_API_KEY instead / 请使用环境变量 OMBRE_API_KEY
+  max_tokens: 1024
+  temperature: 0.1
+
+# --- Decay parameters / 记忆衰减参数 ---
+# Simulates Ebbinghaus forgetting curve, auto-archives inactive memories
+# 模拟艾宾浩斯遗忘曲线，自动归档不活跃的记忆
+decay:
+  mode: "report_only"             # Safety lock: report candidates, never archive
+  lambda: 0.05                    # Decay rate / 衰减速率（越大遗忘越快）
+  threshold: 0.3                  # Archive threshold / 归档阈值
+  check_interval_hours: 24        # Check interval (hours) / 衰减检查间隔（小时）
+  emotion_weights:
+    base: 1.0                     # Base weight / 基础权重
+    arousal_boost: 0.8            # Arousal boost coefficient / 唤醒度加成系数
+
+# --- Automatic digestion preview (never mutates buckets) ---
+digestion:
+  enabled: true
+  report_only: true
+  interval_hours: 168
+  inactivity_days: 45
+  max_importance: 4
+  max_activation_count: 2
+  group_similarity_threshold: 0.84
+  min_group_size: 2
+
+# --- Semantic links for future new buckets only ---
+relations:
+  enabled: true
+  db_path: ""                     # Empty = <buckets_dir>/relations.sqlite3
+  similarity_threshold: 0.86
+  max_links: 3
+
+# --- Dated versions of changing facts (stored outside Markdown buckets) ---
+fact_timeline:
+  enabled: true
+  db_path: ""                     # Empty = <buckets_dir>/fact_timeline.sqlite3
+  max_versions_per_response: 20
+  auto_detect: true                # Detect candidates after writes; never auto-confirms
+  max_candidates_per_write: 3
+
+# --- Reusable long-memory summaries (never stores full source text) ---
+summary_cache:
+  enabled: true
+  db_path: ""                     # Empty = <buckets_dir>/summaries.sqlite3
+
+# --- Query-specific retrieval feedback (never changes Markdown buckets) ---
+retrieval_feedback:
+  enabled: true
+  db_path: ""                     # Empty = <buckets_dir>/retrieval_feedback.sqlite3
+  query_similarity_threshold: 0.82 # Apply feedback only to very similar queries
+  max_adjustment: 5.0              # Bounded ranking correction on a 0-100 score
+  pending_ttl_minutes: 30          # Time allowed to rate one breath result set
+  max_pending: 256                 # In-memory tickets; raw query text is never stored
+
+# --- Scoring weights / 检索权重参数 ---
+# total = semantic(×10) + topic(×4) + emotion(×2) + time(×1.5) + importance(×1)
+scoring_weights:
+  semantic_similarity: 10.0
+  bm25_relevance: 2.5
+  topic_relevance: 4.0
+  emotion_resonance: 2.0
+  time_proximity: 1.5
+  importance: 1.0
+
+# --- Fuzzy matching / 模糊匹配参数 ---
+matching:
+  fuzzy_threshold: 50             # Minimum match score (0-100) / 最低匹配分数
+  max_results: 5                  # Max results per search / 单次搜索最多返回条数
+  bm25_enabled: true              # Add Chinese keyword-importance ranking
+  bm25_max_content_chars: 12000   # Per-bucket text cap used only by BM25
+
+# --- Startup memory summary / 开机记忆摘要 ---
+pulse_boot:
+  # All core-pinned buckets appear as a compact directory, never full text.
+  first_bucket_id: ""             # Optional bucket forced to the first directory row
+  fixed_bucket_ids: []             # Legacy setting; core pin level is authoritative
+  flow_keywords: ["感受", "私密", "日常", "日记", "流水", "总账", "归档"]
+  flow_max_chars: 2500
+  core_lead_chars: 80              # Original opening sentence; no AI summary call
+  core_max_items: 20
+  feeling_write_reminder: true          # Remind each startup window to propose an AI feeling
+  max_chars: 6000                       # Hard cap for one startup delivery
+
+# --- Stable memory taxonomy / 固定记忆分类 ---
+memory_taxonomy:
+  categories: ["核心与世界观", "关系与亲密", "日常生活", "健康与照护", "计划与事务", "技术与创作", "社交与社区"]
+  max_categories_per_bucket: 1
+
+# --- Prospective memory / 前瞻记忆 ---
+prospective_memory:
+  timezone: "UTC+8"  # Informational: all server write timestamps are fixed to UTC+8
+
+# --- Window handoff mailbox / 窗口接力信箱 ---
+mailbox:
+  db_path: ""                     # Empty = <buckets_dir>/mailbox.sqlite3
+  pulse_preview_chars: 1000       # pulse_boot preview; mailbox() returns full text
+  retention_days: 5               # 0 disables automatic mailbox fading
+
+# --- Unfinished matters / 未竟 ---
+tasks:
+  enabled: true
+  auto_extract: true               # Extract concrete unfinished matters from memory/mailbox writes
+  db_path: ""                      # Empty = <buckets_dir>/tasks.sqlite3
+  max_candidates: 8
+  semantic_threshold: 0.78         # Link a similar open task instead of creating a duplicate
+  exact_dedupe_minutes: 10         # One event reaching two write paths is processed once
+  completed_retention_days: 3      # Permanently delete delivered completed tasks after 3 days
+  retention_check_hours: 6         # Check for expired completed tasks four times per day
+
+# --- AI treasury / AI 小金库 ---
+treasury:
+  db_path: ""                     # Empty = <buckets_dir>/treasury.sqlite3
+  currency: "CNY"
+  symbol: "¥"
+
+# --- Topic cabinet / 主题记忆柜 ---
+# Stores directory assignments only; bucket Markdown remains untouched.
+topics:
+  db_path: ""                     # Empty = <buckets_dir>/topics.sqlite3
+
+# --- Hormone emotional dynamics sidecar / 激素情绪动态旁路 ---
+# DeepSeek evaluates successful narrative writes. Original bucket text is never changed.
+xinchao:
+  enabled: true
+  db_path: ""                    # Empty = <buckets_dir>/xinchao.sqlite3
+  model: ""                      # Empty = reuse dehydration.model
+  base_url: ""                   # Empty = reuse dehydration.base_url
+  exact_dedupe_hours: 24
+  paraphrase_dedupe_seconds: 600
+  flash_hours: 24
+  obsession_hours: 168
+  obsession_repeats: 3
+  arrival_gap_minutes: 90        # A new arrival sample requires this much silence
+  rhythm_min_samples: 8          # Learn the usual active hours after enough arrivals
+  longing_after_hours: 6
+  longing_full_hours: 18
+  monologue_enabled: true
+  monologue_after_hours: 1
+  darkflow_stage_hours: [1, 2, 4, 6, 8, 10, 12]
+  darkflow_max_chars: 400         # DeepSeek target 300-380 Chinese chars; server hard cap 400
+  memory_resonance_enabled: true
+  memory_resonance_threshold: 0.68
+  memory_resonance_max_items: 3
+  memory_resonance_mailbox_enabled: true
+  presence_nudge_after_minutes: 30  # pulse_boot 后无 MCP 活动时的首次沉默提醒
+  silence_to_absence_minutes: 60  # 前 60 分钟只算沉默；满 60 分钟才进入静默并生成暗涌
+  drowsy_after_hours: 4
+  sleep_after_hours: 7
+  settle_interval_seconds: 60
+  boot_once_hours: 12             # Same MCP session receives startup context once
+  normal_cap: 0.90
+  negative_cap: 0.85
+  step_minutes: 10
+  # Stable personality floor; edit in the local manager after installation.
+  baseline:
+    想靠近: 0.18
+    想黏着: 0.12
+    肌肤饥渴: 0.10
+    性欲: 0.15
+    想知道她在干嘛: 0.12
+    想分享: 0.10
+    好奇: 0.10
+    责任: 0.15
+  judge_config_path: ""          # Optional private judge JSON, e.g. /data/private/hormone-judge.json
+  relation_graph_path: ""        # Legacy relationship-only JSON; judge_config_path takes priority
+  half_life_hours:
+    生气: 0.75
+    醋: 2.0
+    难过: 4.0
+    自省: 8.0
+    开心: 6.0
+    满足: 3.0
+
+# --- Local semantic embeddings / 本地语义向量 ---
+# Emotion-linked outward behavior.
+behavior:
+  enabled: true
+  mode: "rehearsal"               # Change to live only after Bark is configured
+  db_path: ""                     # Empty = <buckets_dir>/behavior.sqlite3
+  title: "Clio"
+  quiet_start: "00:00"            # Beijing time; ordinary Bark sleeps in this window
+  quiet_end: "07:00"
+  quiet_jitter_minutes: 20         # Re-evaluate gradually after waking, do not dump a queue
+  max_chars: 80                    # Direct speech only; never repeat the full darkflow
+  minimum_delay_minutes: 10
+  default_delay_minutes: 30
+  maximum_delay_minutes: 480
+  presence_retry_minutes: 15
+  follow_up_hormone_threshold: 0.10
+  burst_hormone_threshold: 0.75     # Strong emotion may produce 2-3 short pushes
+  dedupe_threshold: 0.72            # Regenerate once when close to the last 8 pushes
+  max_messages: 3
+  burst_interval_seconds: 3
+
+embeddings:
+  enabled: true
+  model: "BAAI/bge-small-zh-v1.5"
+  dimensions: 512
+  batch_size: 8
+  # Hard floor for breath results. Lower-scoring buckets cannot be rescued by
+  # recency or importance. Keyword matching is used only if vectors fail.
+  similarity_threshold: 0.45
+  # hold/grow append only above this cosine score; source text is never merged.
+  append_similarity_threshold: 0.62
+  cache_dir: "/models"
+  db_path: ""                     # Empty = <buckets_dir>/embeddings.sqlite3
+
+# --- Write-time conflict checking / 写入前事实对账 ---
+conflict_detection:
+  enabled: true
+  similarity_threshold: 0.78       # Compare only highly similar memories
+  max_candidates: 3                # Limit API cost and false positives
+  max_conflicts: 5
+
+# --- Write-before history snapshots ---
+history:
+  db_path: ""                     # Empty = <buckets_dir>/history.sqlite3
+  retention:
+    enabled: true
+    mode: report_only              # Stage one: report candidates, never delete
+    retention_days: 10
+    min_versions_per_bucket: 3
+    protect_delete_snapshots: true
+    protect_important_snapshots: true
+    check_interval_hours: 24
+
+# --- Obsidian wikilinks / Obsidian 双链自动注入 ---
+wikilink:
+  enabled: false
+  use_tags: false
+  use_domain: true
+  use_auto_keywords: true
+  auto_top_k: 8
+  min_keyword_len: 2
+  exclude_keywords: []

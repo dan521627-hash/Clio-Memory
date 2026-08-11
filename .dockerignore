@@ -1,0 +1,16 @@
+.git
+.github
+.env
+config.yaml
+data
+models
+exports
+private
+*.sqlite3*
+*.log
+*.tar*
+*.zip
+__pycache__
+test_*.py
+docs
+

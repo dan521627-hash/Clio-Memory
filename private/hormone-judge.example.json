@@ -1,0 +1,9 @@
+{
+  "relationship_context": "Describe the relationship context without real names.",
+  "interpretation_rules": [
+    "Infer state only from the event and expressed feeling.",
+    "Do not treat one event as a permanent personality trait.",
+    "Allow recovery and mixed emotions after an event ends."
+  ]
+}
+
