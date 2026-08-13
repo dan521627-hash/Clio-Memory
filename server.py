@@ -2382,14 +2382,6 @@ async def pulse_boot() -> str:
     await history_retention_engine.ensure_started()
     settings = config.get("pulse_boot", {})
     session_id = _active_mcp_session_key()
-    if session_id:
-        previous_delivery = await xinchao_service.boot_delivery(session_id)
-        if previous_delivery:
-            return _with_response_seal(
-                "本窗口已经领取过开机资料，为避免重复烧额度，本次不再重复发送。\n"
-                f"上次交付时间（UTC+8）：{previous_delivery['delivered_at']}\n"
-                "需要深读时请按目录调用 recall，不要重复领取整份开机资料。"
-            )
     max_chars = max(2000, min(12000, int(settings.get("max_chars", 6000))))
     core_lead_chars = max(40, min(160, int(settings.get("core_lead_chars", 80))))
     core_max_items = max(1, min(30, int(settings.get("core_max_items", 20))))
@@ -2649,11 +2641,6 @@ async def pulse_boot() -> str:
     if len(body) > max_chars:
         suffix = "\n\n【开机资料已达到固定上限，其余记忆请按需使用 recall 深读。】"
         body = body[: max(1, max_chars - len(suffix))].rstrip() + suffix
-    if session_id:
-        try:
-            await xinchao_service.record_boot_delivery(session_id, body)
-        except Exception as error:
-            logger.warning("pulse_boot delivery record failed: %s", error)
     if darkflow and "【静默后的变化·暗涌，仅展示一次】" in body:
         try:
             await xinchao_service.mark_darkflow_delivered(
