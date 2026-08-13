@@ -274,6 +274,7 @@ class BehaviorStore:
                 SELECT *
                 FROM behavior_actions
                 WHERE status='sent' AND handoff_status='pending'
+                    AND acknowledged_at IS NULL
                 ORDER BY action_id DESC
                 """
             ).fetchall()
