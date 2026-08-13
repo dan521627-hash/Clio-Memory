@@ -6,7 +6,7 @@
   <meta name="color-scheme" content="light">
   <meta name="theme-color" content="#c9644e">
   <title>Clio 记忆管理</title>
-  <link rel="stylesheet" href="manager.css?v=20260813-emotion-ticket-1">
+  <link rel="stylesheet" href="manager.css?v=20260813-push-title-1">
   <link rel="stylesheet" href="immersive-house.css?v=20260811-house-v2-1">
 </head>
 <body class="is-opening">
@@ -61,6 +61,13 @@
       <summary><i data-lucide="settings-2"></i><span>高级设置</span><i data-lucide="chevron-down"></i></summary>
       <div class="advanced-menu-panel">
         <div class="advanced-menu-heading"><small>CLIO · HOUSEKEEPING</small><strong>小屋设置</strong><span>日常房间之外的工具都收在这里。</span></div>
+        <form class="push-title-setting" id="pushTitleSetting">
+          <i data-lucide="bell-ring" aria-hidden="true"></i>
+          <label for="pushTitleInput"><strong>推送署名</strong><small>以后 Bark 通知顶部显示的名字</small></label>
+          <input id="pushTitleInput" maxlength="60" autocomplete="off" placeholder="例如：顾川" required>
+          <button type="submit" title="保存推送署名" aria-label="保存推送署名"><i data-lucide="check"></i></button>
+          <span id="pushTitleStatus" role="status"></span>
+        </form>
         <button type="button" id="newMemory"><i data-lucide="plus"></i><span><strong>新建记忆</strong><small>手动写入一条内容</small></span></button>
         <button type="button" id="toolboxNav"><i data-lucide="package-open"></i><span><strong>百宝箱</strong><small>辅助工具与入口</small></span></button>
         <button type="button" id="topicNav"><i data-lucide="library-big"></i><span><strong>主题目录</strong><small>按房间和主题进入记忆</small></span></button>
@@ -832,6 +839,6 @@
   <div class="toast" id="managerToast" role="status"></div>
 
   <script src="lucide.min.js"></script>
-  <script src="manager.js?v=20260811-timeline-smart-1"></script>
+  <script src="manager.js?v=20260813-push-title-1"></script>
 </body>
 </html>

@@ -216,10 +216,24 @@ class BehaviorService:
     def configured(self) -> bool:
         return bool(self.device_key)
 
+    @staticmethod
+    def _clean_push_title(value: str) -> str:
+        return re.sub(r"[\x00-\x1f\x7f]+", " ", str(value or "")).strip()[:60]
+
+    async def push_title(self) -> str:
+        stored = await self.store.get_meta("push_title", self.title)
+        return self._clean_push_title(stored) or self.title or "Clio"
+
+    async def set_push_title(self, value: str) -> str:
+        title = self._clean_push_title(value)
+        if not title:
+            raise ValueError("推送署名不能为空")
+        return await self.store.set_meta("push_title", title)
+
     async def _send_bark(self, content: str) -> None:
         payload = {
             "device_key": self.device_key,
-            "title": self.title,
+            "title": await self.push_title(),
             "body": content,
             "group": "Clio",
             "level": "active",

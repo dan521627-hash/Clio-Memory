@@ -1945,6 +1945,7 @@ document.querySelector('#settingsNav').addEventListener('click', event => {
   const menu = document.querySelector('#advancedMenu');
   menu.open = !menu.open;
   document.querySelector('#settingsNav').classList.toggle('is-active', menu.open);
+  if (menu.open) loadPushTitleSetting().catch(error => toast(error.message, true));
 });
 document.querySelector('#advancedMenu').addEventListener('toggle', event => {
   document.querySelector('#settingsNav').classList.toggle('is-active', event.currentTarget.open);
@@ -1953,6 +1954,33 @@ document.addEventListener('click', event => {
   const menu = document.querySelector('#advancedMenu');
   if (!menu.open || menu.contains(event.target)) return;
   menu.open = false;
+});
+
+async function loadPushTitleSetting() {
+  const result = await api('/api/behavior/settings');
+  document.querySelector('#pushTitleInput').value = result.push_title || 'Clio';
+  document.querySelector('#pushTitleStatus').textContent = '';
+}
+
+document.querySelector('#pushTitleSetting').addEventListener('submit', async event => {
+  event.preventDefault();
+  event.stopPropagation();
+  const input = document.querySelector('#pushTitleInput');
+  const status = document.querySelector('#pushTitleStatus');
+  const pushTitle = input.value.trim();
+  if (!pushTitle) return;
+  status.textContent = '正在保存';
+  try {
+    const result = await api('/api/behavior/settings', {
+      method: 'PUT',
+      body: JSON.stringify({push_title: pushTitle}),
+    });
+    input.value = result.push_title;
+    status.textContent = '已保存，以后的推送都会使用这个名字';
+  } catch (error) {
+    status.textContent = '';
+    toast(error.message, true);
+  }
 });
 document.querySelector('#intelligentSearchForm').addEventListener('submit', event => {
   event.preventDefault();

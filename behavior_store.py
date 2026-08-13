@@ -148,6 +148,29 @@ class BehaviorStore:
                 (secrets.token_hex(32),),
             )
 
+    def _get_meta_sync(self, key: str, default: str = "") -> str:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT meta_value FROM behavior_meta WHERE meta_key=?",
+                (str(key),),
+            ).fetchone()
+        return str(row[0]) if row else str(default)
+
+    async def get_meta(self, key: str, default: str = "") -> str:
+        return await asyncio.to_thread(self._get_meta_sync, key, default)
+
+    def _set_meta_sync(self, key: str, value: str) -> str:
+        with self._connect() as connection:
+            connection.execute(
+                "INSERT INTO behavior_meta(meta_key, meta_value) VALUES (?, ?) "
+                "ON CONFLICT(meta_key) DO UPDATE SET meta_value=excluded.meta_value",
+                (str(key), str(value)),
+            )
+        return str(value)
+
+    async def set_meta(self, key: str, value: str) -> str:
+        return await asyncio.to_thread(self._set_meta_sync, key, value)
+
     def _get_for_stage_sync(self, cycle_id: int, stage_index: int) -> dict | None:
         with self._connect() as connection:
             row = connection.execute(
