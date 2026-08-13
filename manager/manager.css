@@ -1715,10 +1715,15 @@ body {
   min-height: 5.2%;
   padding: 7px 10px;
   color: #463d31;
-  background: rgba(255, 248, 232, .82);
-  border: 1px solid rgba(117, 87, 59, .26);
-  border-radius: 6px;
-  box-shadow: 0 8px 20px rgba(70, 48, 31, .08);
+  background: transparent;
+  border: 0;
+  border-radius: 50%;
+  box-shadow: none;
+  backdrop-filter: none;
+}
+.emotion-ticket:hover {
+  background: transparent;
+  border-color: transparent;
 }
 .emotion-ticket b { color: var(--villa-terracotta); }
 
