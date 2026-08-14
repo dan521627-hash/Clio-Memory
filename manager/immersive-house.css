@@ -668,12 +668,16 @@ body.viewing-house .memory-house {
   z-index: 4;
   min-height: 0;
   display: flex;
+  flex-direction: column;
   align-items: center;
   justify-content: center;
   gap: 7px;
   padding: 2px 4px;
   color: #3f4930;
   text-align: center;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0;
+  line-height: 1;
   background: transparent;
   border: 0;
   outline: 0;
@@ -698,6 +702,9 @@ body.viewing-house .memory-house {
   align-items: center;
   justify-content: center;
   width: 100%;
+  height: 100%;
+  line-height: 1;
+  text-align: center;
 }
 
 .house-v2 .house-room > span svg,
@@ -708,18 +715,28 @@ body.viewing-house .memory-house {
 }
 
 .house-v2 .house-room strong {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  overflow: visible;
   color: inherit;
   font-family: "Noto Serif SC", "Songti SC", "Microsoft YaHei", serif;
   font-size: inherit;
   font-weight: 650;
-  line-height: 1.15;
+  letter-spacing: 0;
+  line-height: 1;
+  text-align: center;
+  text-overflow: clip;
   white-space: nowrap;
 }
 
 .house-v2 .room-study {
   top: 28.6%;
-  left: 15%;
-  width: 21%;
+  left: 13.8%;
+  width: 22%;
   height: 3.4%;
   color: #563d28;
   font-size: clamp(14px, 3vw, 19px);
@@ -728,8 +745,8 @@ body.viewing-house .memory-house {
 
 .house-v2 .room-mailbox {
   top: 28.1%;
-  right: 15%;
-  width: 18%;
+  right: 11.8%;
+  width: 22%;
   height: 3.2%;
   color: #583e2a;
   font-size: clamp(15px, 3.1vw, 19px);
@@ -784,17 +801,27 @@ body.viewing-house .memory-house {
 
 .house-v2 .emotion-ticket strong {
   display: block;
+  align-self: center;
+  width: 100%;
+  margin: 0;
   max-width: 100%;
   color: inherit;
   font-family: "Noto Serif SC", "Songti SC", "Microsoft YaHei", serif;
   font-size: clamp(15px, 3.6vw, 22px);
   font-weight: 600;
   line-height: 1.22;
+  text-align: center;
 }
 
 .house-v2 .emotion-ticket b {
+  align-self: center;
+  width: 100%;
+  margin: 0;
   color: #a95f43;
   font: 500 clamp(17px, 3.8vw, 28px)/1 Georgia, "Times New Roman", serif;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0;
+  text-align: center;
 }
 
 .house-v2 .push-acknowledgement {
