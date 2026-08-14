@@ -22,10 +22,10 @@ class BehaviorSettingsTests(unittest.IsolatedAsyncioTestCase):
             root = Path(folder)
             service = self._service(root)
             self.assertEqual(await service.push_title(), "Clio")
-            self.assertEqual(await service.set_push_title("顾川"), "顾川")
+            self.assertEqual(await service.set_push_title("Example AI"), "Example AI")
 
             restarted = self._service(root)
-            self.assertEqual(await restarted.push_title(), "顾川")
+            self.assertEqual(await restarted.push_title(), "Example AI")
             await restarted.set_push_title("新名字")
 
             response = AsyncMock()

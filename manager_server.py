@@ -202,6 +202,13 @@ app = FastAPI(
 
 MANAGER_COOKIE = "clio_manager_session"
 manager_password = os.environ.get("CLIO_MANAGER_PASSWORD", "").strip()
+if manager_password.upper() in {
+    "CHANGE_ME_TO_A_STRONG_PASSWORD",
+    "CHANGE_ME",
+    "YOUR_MANAGER_PASSWORD",
+}:
+    logger.error("CLIO_MANAGER_PASSWORD is still a documented example value")
+    manager_password = ""
 login_failures: dict[str, list[float]] = {}
 
 

@@ -103,6 +103,11 @@ logger = logging.getLogger("ombre_brain")
 
 RESPONSE_SEAL_ENV = "OMBRE_RESPONSE_SEAL"
 RESPONSE_SEAL_MISSING = "[ERROR: OMBRE_RESPONSE_SEAL_NOT_CONFIGURED]"
+RESPONSE_SEAL_PLACEHOLDERS = {
+    "CHANGE_ME_TO_A_RANDOM_PRIVATE_SEAL",
+    "CHANGE_ME",
+    "YOUR_PRIVATE_SEAL",
+}
 PAGINATION_MIN_PAGE_SIZE = 200
 PAGINATION_MAX_PAGE_SIZE = 8000
 PAGINATION_SNAPSHOT_TTL_SECONDS = 600
@@ -117,6 +122,20 @@ def _with_response_seal(text: str) -> str:
     """Append the response seal without caching or persisting its value."""
     seal = os.environ.get(RESPONSE_SEAL_ENV, "").strip() or RESPONSE_SEAL_MISSING
     return f"{text}\nseal: {seal}"
+
+
+def _validate_response_seal() -> str:
+    """Refuse production startup with a missing or documented example seal."""
+    seal = os.environ.get(RESPONSE_SEAL_ENV, "").strip()
+    if not seal:
+        raise RuntimeError(
+            "OMBRE_RESPONSE_SEAL 未配置。请先在 .env 中生成随机私密暗语。"
+        )
+    if seal.upper() in {value.upper() for value in RESPONSE_SEAL_PLACEHOLDERS}:
+        raise RuntimeError(
+            "OMBRE_RESPONSE_SEAL 仍是示例值。请换成随机私密暗语后再启动。"
+        )
+    return seal
 
 
 def _format_treasury_summary(summary: dict) -> str:
@@ -1107,7 +1126,9 @@ async def health_check(request):
         return JSONResponse({
             "status": "ok",
             "buckets": stats["permanent_count"] + stats["dynamic_count"],
-            "decay_engine": "running" if decay_engine.is_running else "stopped",
+            "decay_engine": (
+                "running" if decay_engine.is_running else "idle_until_first_memory_operation"
+            ),
         })
     except Exception as e:
         return JSONResponse({"status": "error", "detail": str(e)}, status_code=500)
@@ -2810,7 +2831,7 @@ async def pulse(
         f"动态记忆桶: {stats['dynamic_count']} 个\n"
         f"归档记忆桶: {stats['archive_count']} 个\n"
         f"总存储大小: {stats['total_size_kb']:.1f} KB\n"
-        f"衰减引擎: {'运行中' if decay_engine.is_running else '已停止'}\n"
+        f"衰减引擎: {'运行中' if decay_engine.is_running else '等待首次记忆操作'}\n"
     )
 
     # --- List all bucket summaries / 列出所有桶摘要 ---
@@ -3607,6 +3628,7 @@ async def _task_retention_loop() -> None:
 
 
 if __name__ == "__main__":
+    _validate_response_seal()
     transport = config.get("transport", "stdio")
     logger.info(f"Ombre Brain starting | transport: {transport}")
 

@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import re
 from datetime import timedelta
 from difflib import SequenceMatcher
 
@@ -137,15 +138,21 @@ class TaskService:
                 {
                     "role": "system",
                     "content": (
-                        "你从一段真实事件中维护未竟事项，不总结记忆。只抓明确需要以后完成、等待结果、"
-                        "承诺要做或仍需处理的事情。流水账、情绪、愿望、已经当场结束的动作不要建任务。"
+                        "你从一段真实事件中维护未竟事项，不总结记忆。只抓有限、具体、以后能够明确判断"
+                        "完成或未完成的行动，以及正在等待的明确结果。关系承诺、道歉后的表态、长期相处态度、"
+                        "人格或行为准则、说话方式、情绪、愿望、流水账和已经当场结束的动作都不要建任务。"
+                        "例如‘明天续费’‘周五复诊’可以建任务；‘以后对她好’‘不再说难听的话’"
+                        "‘让她开心’不能建任务。只有存在可观察的完成标准时才能 create。"
                         "如果事件明确说明已有事项完成、取消或出现了一个新的后续任务，使用给出的 task_id。"
                         "不要因相似措辞重复建任务；同一件事只保留一条。人工修改过的状态优先，"
                         "只有事件明确写出后来又产生了新的需求时才可 reopen。importance 为1到5："
                         "1很低、2较低、3普通、4重要、5紧要。最多返回5个动作。"
                         "只返回JSON：{\"actions\":[{\"action\":\"create|complete|cancel|reopen\","
                         "\"task_id\":0,\"title\":\"简短事项\",\"details\":\"必要上下文\","
-                        "\"importance\":3,\"evidence\":\"原文依据\"}]}。没有事项就返回空数组。"
+                        "\"importance\":3,\"task_type\":\"finite_action|waiting|ongoing_attitude|emotion\","
+                        "\"completion_criterion\":\"怎样才算完成\",\"evidence\":\"原文依据\"}]}。"
+                        "create 只允许 task_type 为 finite_action 或 waiting，且 completion_criterion 不能为空。"
+                        "没有事项就返回空数组。"
                     ),
                 },
                 {"role": "user", "content": json.dumps(context, ensure_ascii=False)},
@@ -159,6 +166,33 @@ class TaskService:
         payload = self.evaluator._clean_json(str(raw or ""))
         actions = payload.get("actions", [])
         return actions[:5] if isinstance(actions, list) else []
+
+    @staticmethod
+    def _valid_create_action(action: dict) -> bool:
+        """Reject open-ended attitudes even if the evaluator calls them tasks."""
+        task_type = str(action.get("task_type", "")).strip().lower()
+        completion = str(action.get("completion_criterion", "")).strip()
+        if task_type not in {"finite_action", "waiting"} or not completion:
+            return False
+        text = " ".join(
+            str(action.get(key, "")).strip()
+            for key in ("title", "details", "completion_criterion", "evidence")
+        )
+        ongoing_attitude_patterns = (
+            r"(以后|下次|今后).{0,12}(对.{0,8}好|不.{0,8}(说|讲).{0,8}(难听|伤人)|"
+            r"不.{0,8}惹.{0,8}生气|让.{0,8}开心|改.{0,6}(脾气|态度))",
+            r"(永远|一直|每次).{0,12}(爱|陪着|不离开|对.{0,8}好)",
+            r"(相处态度|行为准则|人格准则|说话方式|人物设定)",
+        )
+        concrete_work = re.search(
+            r"(提交|发送|购买|续费|预约|复诊|办理|缴纳|领取|取件|联系|回复|"
+            r"整理|修改|更新|删除|完成|确认|查询|检查|去.{0,8}(医院|学校|公司))",
+            text,
+            re.IGNORECASE,
+        )
+        if any(re.search(pattern, text, re.IGNORECASE) for pattern in ongoing_attitude_patterns):
+            return bool(concrete_work)
+        return True
 
     async def _candidate_tasks(self, content: str) -> list[dict]:
         matches = await self.search(content, limit=self.max_candidates, include_closed=True)
@@ -181,6 +215,9 @@ class TaskService:
         kind = str(action.get("action", "")).strip().lower()
         evidence = str(action.get("evidence", "")).strip()[:800]
         if kind == "create":
+            if not self._valid_create_action(action):
+                logger.info("Rejected non-finite unfinished item: %s", action.get("title", ""))
+                return None
             title = str(action.get("title", "")).strip()
             if not title:
                 return None

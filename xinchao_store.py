@@ -1604,10 +1604,27 @@ class XinchaoService:
                 {"开心": 0.04, "满足": 0.06},
                 floors,
             )
-            connection.execute(
-                "DELETE FROM xinchao_darkflow WHERE slot_id=1 AND cycle_id=?",
+            pending_darkflow = connection.execute(
+                "SELECT status FROM xinchao_darkflow "
+                "WHERE slot_id=1 AND cycle_id=?",
                 (previous_cycle_id,),
+            ).fetchone()
+            darkflow_carried = bool(
+                pending_darkflow and pending_darkflow["status"] == "pending"
             )
+            if darkflow_carried:
+                # A push acknowledgement settles outward behavior, not inner handoff.
+                connection.execute(
+                    "UPDATE xinchao_darkflow SET cycle_id=? "
+                    "WHERE slot_id=1 AND cycle_id=? AND status='pending'",
+                    (next_cycle_id, previous_cycle_id),
+                )
+            else:
+                connection.execute(
+                    "DELETE FROM xinchao_darkflow "
+                    "WHERE slot_id=1 AND cycle_id=?",
+                    (previous_cycle_id,),
+                )
             connection.execute(
                 """
                 UPDATE xinchao_state SET cycle_id=?, cycle_open=1,
@@ -1638,6 +1655,7 @@ class XinchaoService:
                     "partially_settled": True,
                     "changed_pipes": len(changed),
                     "positive_response": 0.10,
+                    "pending_darkflow_carried": darkflow_carried,
                 },
             )
         return {
@@ -1646,6 +1664,7 @@ class XinchaoService:
             "cycle_id": next_cycle_id,
             "silence_started_at": stamp,
             "pipes": pipes,
+            "pending_darkflow_carried": darkflow_carried,
         }
 
     async def acknowledge_seen(self) -> dict:
