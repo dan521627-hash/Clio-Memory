@@ -29,3 +29,9 @@ httpx>=0.27.0
 
 # Lightweight local ONNX embeddings (no PyTorch dependency)
 fastembed>=0.7.0,<1.0.0
+
+# Standalone manager UI and local .env loading
+fastapi>=0.115.0,<1.0.0
+uvicorn>=0.34.0,<1.0.0
+pyzipper>=0.3.6,<1.0.0
+python-dotenv>=1.0.0,<2.0.0

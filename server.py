@@ -1678,7 +1678,7 @@ async def breath(
     if retrieval_id:
         feedback_header = (
             "【检索编号提醒】\n"
-            f"recall 时请带 retrieval_id={retrieval_id}\n"
+            f"recall 时请带 retrieval_id={retrieval_id}，并同时带 bucket_id=<结果中的桶号>\n"
             "不要裸调 recall，否则系统无法记录本次真正采用的记忆。\n---\n"
         )
     rendered_parts = []

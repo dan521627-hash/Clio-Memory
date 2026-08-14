@@ -1847,3 +1847,9 @@ async def export_memories(payload: ExportRequest):
 manager_dir = Path(__file__).resolve().parent / "manager"
 app.mount("/manage", StaticFiles(directory=manager_dir, html=True), name="manager-mobile")
 app.mount("/", StaticFiles(directory=manager_dir, html=True), name="manager")
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run(app, host="0.0.0.0", port=8787)

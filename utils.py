@@ -14,6 +14,7 @@ import re
 import uuid
 import yaml
 import logging
+from dotenv import load_dotenv
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 
@@ -51,6 +52,9 @@ def load_config(config_path: str = None) -> dict:
     Priority: environment variables > config.yaml > built-in defaults.
     优先级：环境变量 > config.yaml > 内置默认值。
     """
+    # Non-Docker users can keep secrets in a local .env file just like Compose users.
+    load_dotenv()
+
     # --- Built-in defaults (fallback so it runs even without config.yaml) ---
     # --- 内置默认配置（兜底，保证即使没有 config.yaml 也能跑）---
     defaults = {

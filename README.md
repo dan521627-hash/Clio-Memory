@@ -129,6 +129,10 @@ chmod +x start.sh
 `idle_until_first_memory_operation`，意思是“等待首次使用”，不是故障；第一次调用
 `breath`、`hold` 或 `grow` 后会变为 `running`。
 
+不使用 Docker 时，可先执行 `pip install -r requirements.txt`，再分别运行
+`python server.py` 和 `python manager_server.py`。两个进程都会自动读取项目目录中的
+`.env`；管理页默认监听 `8787` 端口。
+
 ## 本地运行和 VPS 运行有什么区别
 
 ### 本地版
