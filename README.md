@@ -43,6 +43,7 @@ AI 写下一件事或一封信
 
 详细说明见：
 
+- [公开版更新记录](CHANGELOG.md)
 - [完整功能与联动说明](docs/FEATURES-ZH.md)
 - [小白安装教程](docs/INSTALL-ZH.md)
 - [使用方式与常见问题](docs/FAQ-ZH.md)
