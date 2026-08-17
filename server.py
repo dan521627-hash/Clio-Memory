@@ -1106,7 +1106,7 @@ async def _observe_mcp_activity(session_id: str, messages: list[dict]) -> None:
 # host="0.0.0.0" so Docker container's SSE is externally reachable
 # stdio mode ignores host (no network)
 mcp = FastMCP(
-    "Clio Memory",
+    "Ombre Brain",
     host="0.0.0.0",
     port=8000,
 )
@@ -1166,6 +1166,7 @@ async def _append_or_create(
     allow_append: bool = True,
     ai_feeling: bool = False,
     trigger_date: str = "",
+    write_result: dict | None = None,
 ) -> tuple[str, bool]:
     """
     Append to a semantically matching bucket, or create a new bucket.
@@ -1198,13 +1199,17 @@ async def _append_or_create(
         # --- Never append automatically into pinned/protected buckets ---
         # --- 不自动追加到钉选/保护桶 ---
         if not (bucket["metadata"].get("pinned") or bucket["metadata"].get("protected")):
+            existing_domain = list(bucket["metadata"].get("domain", []))
+            existing_tags = list(bucket["metadata"].get("tags", []))
             appended = _append_source_text(bucket["content"], content)
             updated = await bucket_mgr.update(
                 bucket["id"],
                 content=appended,
-                tags=tags,
+                # An appended fragment belongs to the existing bucket.  Its
+                # one-off classification must not rename the whole bucket.
+                tags=existing_tags or tags,
                 importance=max(bucket["metadata"].get("importance", 5), importance),
-                domain=domain,
+                domain=existing_domain or domain,
                 valence=valence,
                 arousal=arousal,
                 ai_feeling=ai_feeling,
@@ -1214,6 +1219,14 @@ async def _append_or_create(
             if not updated:
                 raise RuntimeError(
                     f"追加写入被保护机制拒绝，旧正文未改动: {bucket['id']}"
+                )
+            if write_result is not None:
+                write_result.update(
+                    {
+                        "bucket_id": bucket["id"],
+                        "name": bucket["metadata"].get("name", bucket["id"]),
+                        "domain": existing_domain or domain,
+                    }
                 )
             return bucket["metadata"].get("name", bucket["id"]), True
 
@@ -1231,6 +1244,10 @@ async def _append_or_create(
     )
     await _auto_link_new_bucket(bucket_id)
     await _auto_topic_new_bucket(bucket_id)
+    if write_result is not None:
+        write_result.update(
+            {"bucket_id": bucket_id, "name": name or bucket_id, "domain": list(domain)}
+        )
     return bucket_id, False
 
 
@@ -1306,18 +1323,63 @@ async def _auto_link_new_bucket(bucket_id: str) -> list[tuple[str, float]]:
 
 async def _visible_related_buckets(source_bucket: dict) -> list[dict]:
     """Resolve sidecar links while hiding sealed, archived, or missing buckets."""
-    if not relation_store.enabled:
-        return []
     metadata = source_bucket.get("metadata", {})
     if metadata.get("sealed", False) or metadata.get("type") == "archived":
         return []
+    max_links = max(1, int(getattr(relation_store, "max_links", 3)))
+    visible = []
+
+    # Confirmed fact history is more specific than semantic resemblance, so it
+    # gets first claim on the small related-memory budget.
     try:
-        related_rows = await relation_store.related(source_bucket["id"])
+        fact_links = await fact_timeline_store.related_buckets(
+            source_bucket["id"], limit=max_links * 3
+        )
+    except Exception as error:
+        logger.warning("Fact-evolution relation lookup failed: %s", error)
+        fact_links = []
+    seen = set()
+    for link in fact_links:
+        related_id = str(link.get("bucket_id", ""))
+        if not related_id or related_id in seen:
+            continue
+        try:
+            bucket = await bucket_mgr.get(related_id)
+        except Exception:
+            continue
+        if not bucket:
+            continue
+        related_meta = bucket.get("metadata", {})
+        if related_meta.get("sealed", False) or related_meta.get("type") == "archived":
+            continue
+        visible.append(
+            {
+                "bucket_id": bucket["id"],
+                "name": related_meta.get("name", bucket["id"]),
+                "similarity": 1.0,
+                "relation_type": "事实演化",
+                "reason": (
+                    f"同一事实：{link.get('fact_label', '')}；"
+                    f"{link.get('effective_date', '')}"
+                    f"{'起为当前版本' if link.get('is_current') else '前为历史版本'}"
+                ),
+            }
+        )
+        seen.add(related_id)
+        if len(visible) >= max_links:
+            break
+
+    if len(visible) >= max_links or not relation_store.enabled:
+        return visible
+    try:
+        related_rows = await relation_store.related_details(source_bucket["id"])
     except Exception as error:
         logger.warning("Related-memory lookup failed: %s", error)
-        return []
-    visible = []
-    for related_id, similarity in related_rows:
+        related_rows = []
+    for relation in related_rows:
+        related_id = relation["bucket_id"]
+        if not related_id or related_id in seen:
+            continue
         try:
             bucket = await bucket_mgr.get(related_id)
         except Exception as error:
@@ -1330,12 +1392,15 @@ async def _visible_related_buckets(source_bucket: dict) -> list[dict]:
             continue
         visible.append(
             {
-                "bucket_id": bucket["id"],
-                "name": related_meta.get("name", bucket["id"]),
-                "similarity": float(similarity),
+                "bucket_id": related_id,
+                "name": related_meta.get("name", related_id),
+                "similarity": float(relation["similarity"]),
+                "relation_type": "语义相似",
+                "reason": relation.get("reason", ""),
             }
         )
-        if len(visible) >= relation_store.max_links:
+        seen.add(related_id)
+        if len(visible) >= max_links:
             break
     return visible
 
@@ -1345,8 +1410,13 @@ def _render_related_buckets(related: list[dict]) -> str:
         return ""
     lines = ["【关联记忆】"]
     lines.extend(
-        f"- bucket_id: {item['bucket_id']} | {item['name']} "
-        f"(相似度 {item['similarity']:.3f})"
+        f"- [{item.get('relation_type', '语义相似')}] bucket_id: "
+        f"{item['bucket_id']} | {item['name']}"
+        + (
+            f"（{item['reason']}）"
+            if item.get("reason")
+            else f"（相似度 {item['similarity']:.3f}）"
+        )
         for item in related
     )
     return "\n" + "\n".join(lines)
@@ -1770,6 +1840,7 @@ async def hold(
         )
 
     # --- Step 2: append or create / 追加或新建 ---
+    placement = {}
     result_name, is_appended = await _append_or_create(
         content=stored_content,
         tags=all_tags,
@@ -1781,14 +1852,18 @@ async def hold(
         allow_append=not conflicts and not normalized_trigger,
         ai_feeling=feeling,
         trigger_date=normalized_trigger,
+        write_result=placement,
     )
-    await _record_write_sidecars(stored_content, "hold", result_name)
+    result_bucket_id = placement.get("bucket_id", result_name)
+    result_domain = placement.get("domain", domain)
+    await _record_write_sidecars(stored_content, "hold", result_bucket_id)
 
     action = "追加→" if is_appended else "新建→"
     feeling_label = " [感受类]" if feeling else ""
     trigger_label = f" [触发:{normalized_trigger}]" if normalized_trigger else ""
     return (
-        f"{action}{result_name} {','.join(domain)}{feeling_label}"
+        f"{action}{result_name} [bucket_id:{result_bucket_id}] "
+        f"{','.join(result_domain)}{feeling_label}"
         f"{trigger_label}{conflict_warning}"
     )
 
@@ -1823,6 +1898,7 @@ async def grow(content: str, message: str = "") -> str:
     analysis = normalize_analysis(stored_content, analysis)
     conflicts = await _check_conflicts(stored_content)
     conflict_warning = _format_conflict_warning(conflicts)
+    placement = {}
     result_name, is_appended = await _append_or_create(
         content=stored_content,
         tags=analysis["tags"],
@@ -1834,11 +1910,15 @@ async def grow(content: str, message: str = "") -> str:
         arousal=analysis["arousal"],
         name=analysis.get("suggested_name", ""),
         allow_append=not conflicts,
+        write_result=placement,
     )
 
     action = "追加→" if is_appended else "新建→"
+    result_bucket_id = placement.get("bucket_id", result_name)
+    result_domain = placement.get("domain", analysis["domain"])
     response = (
-        f"{action}{result_name} {','.join(analysis['domain'])}"
+        f"{action}{result_name} [bucket_id:{result_bucket_id}] "
+        f"{','.join(result_domain)}"
         f"{conflict_warning}"
     )
     if message and message.strip():
@@ -1850,7 +1930,7 @@ async def grow(content: str, message: str = "") -> str:
     await _record_write_sidecars(
         combined_task_content,
         "grow",
-        result_name,
+        result_bucket_id,
         task_content=combined_task_content,
     )
     return response
@@ -2571,48 +2651,24 @@ async def pulse_boot() -> str:
     handoff_parts = []
     has_darkflow = bool(darkflow and str(darkflow.get("content", "")).strip())
     if has_darkflow:
-        stage_labels = {
-            "awake_waiting": "清醒等待",
-            "drowsy": "困倦",
-            "light_sleep": "浅睡",
-            "dreaming": "梦境沉淀",
-            "deep_sleep": "深睡",
-            "hibernating": "深度休眠",
-        }
-        stage_label = stage_labels.get(
-            str(darkflow.get("sleep_stage", "")),
-            str(darkflow.get("sleep_stage", "未知")),
-        )
-        darkflow_lines = ["【静默后的变化·暗涌，仅展示一次】"]
-        if darkflow.get("absence_started_at"):
-            darkflow_lines.append(
-                f"离开时间（UTC+8）: {darkflow['absence_started_at']}"
-            )
-        if darkflow.get("created_at"):
-            darkflow_lines.append(f"本次沉淀（UTC+8）: {darkflow['created_at']}")
         boot_elapsed_seconds = int(
             xinchao_state.get("elapsed_seconds", darkflow.get("elapsed_seconds", 0))
         )
-        darkflow_lines.extend(
-            [
-                "距离上次交流结束到本次开机: "
-                f"{xinchao_service.format_elapsed_zh(boot_elapsed_seconds)}",
-                f"当前阶段: {stage_label}",
-            ]
+        handoff_parts.append(
+            "【有一条新的暗涌】\n"
+            "静默期间形成了一条新的内在沉淀，正文不在开机摘要中展开；"
+            "需要时再调用 xinchao_status 或 inner_state 深读。\n"
+            "从上一轮明确结束到本次开机已过去："
+            f"{xinchao_service.format_elapsed_zh(boot_elapsed_seconds)}"
         )
-        if darkflow.get("next_stage_at"):
-            darkflow_lines.append(f"下一阶段: {darkflow['next_stage_at']}")
-        darkflow_lines.append(str(darkflow.get("content", "")).strip())
-        handoff_parts.append("\n".join(darkflow_lines))
-        if mailbox_context:
-            handoff_parts.append(
-                "【信箱有一封最新留言】\n"
-                f"message_id: {mailbox_context['message_id']}｜"
-                f"时间: {mailbox_context['created_at']}\n"
-                "正文未自动展开；结合当前对话判断是否需要调用 "
-                f"mailbox(action=\"get\", message_id={mailbox_context['message_id']})。"
-            )
-    elif mailbox_text:
+    elif bool(xinchao_state.get("static_ready", False)):
+        boot_elapsed_seconds = int(xinchao_state.get("elapsed_seconds", 0))
+        handoff_parts.append(
+            "【静默时长】\n"
+            "从上一轮明确结束到本次开机已过去："
+            f"{xinchao_service.format_elapsed_zh(boot_elapsed_seconds)}"
+        )
+    if mailbox_text:
         handoff_parts.append(f"【信箱最新留言】\n{mailbox_text}")
     handoff_text = "\n\n".join(handoff_parts)
 
@@ -2662,7 +2718,7 @@ async def pulse_boot() -> str:
     if len(body) > max_chars:
         suffix = "\n\n【开机资料已达到固定上限，其余记忆请按需使用 recall 深读。】"
         body = body[: max(1, max_chars - len(suffix))].rstrip() + suffix
-    if darkflow and "【静默后的变化·暗涌，仅展示一次】" in body:
+    if darkflow and "【有一条新的暗涌】" in body:
         try:
             await xinchao_service.mark_darkflow_delivered(
                 int(darkflow["cycle_id"])
@@ -2684,7 +2740,7 @@ async def pulse_boot() -> str:
             session_id=session_id,
             source="mcp:pulse_boot",
             event_id=_active_mcp_event_key(),
-            start_cycle=True,
+            start_cycle=False,
         )
     except Exception as error:
         logger.warning("pulse_boot presence timer could not start: %s", error)
@@ -2784,17 +2840,17 @@ async def inner_state() -> str:
 
 @mcp.tool()
 async def heartbeat(event_id: str = "") -> str:
-    """heartbeat presence alive 无正文报到，防止活跃窗口被误判为离开"""
+    """heartbeat presence alive 无正文报到，不开启静默或暗涌计时"""
     result = await xinchao_service.observe_presence(
         session_id=_active_mcp_session_key(),
         source="mcp:heartbeat",
         event_id=event_id or _active_mcp_event_key(),
-        start_cycle=True,
+        start_cycle=False,
     )
     return _with_response_seal(
         "已记录仍在当前窗口，未读取或写入任何记忆正文。\n"
         f"时间（UTC+8）：{beijing_now().isoformat(timespec='seconds')}\n"
-        f"状态：{'已开启新的沉默计时' if result.get('cycle_started') else ('已从睡眠唤醒并刷新计时' if result.get('woke') else '已刷新沉默计时')}"
+        "状态：仅记录当前窗口仍在，不影响激素、心念、静默或暗涌。"
     )
 
 
@@ -3585,13 +3641,12 @@ async def _xinchao_settlement_loop() -> None:
         try:
             mailbox_context = await _pulse_boot_mailbox_context()
             state = await xinchao_service.status()
-            await behavior_service.process_silence_nudge(state)
             settled = await xinchao_service.settle_darkflow(
                 mailbox_context=mailbox_context
             )
             darkflow = await xinchao_service.pending_darkflow()
             state = await xinchao_service.status()
-            if state.get("interaction_phase") == "silence":
+            if state.get("interaction_phase") != "absence":
                 darkflow = None
             due_results = await behavior_service.process_due(
                 state, mailbox_context, darkflow

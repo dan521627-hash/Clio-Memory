@@ -547,14 +547,14 @@ function renderTimeline() {
     const versions = group.versions || [];
     return `<details class="timeline-fact" ${versions.length <= 2 ? 'open' : ''}>
       <summary>
-        <span><small>当前事实</small><strong>${escapeHtml(group.fact_label)}</strong></span>
+        <span><small>事实变化线</small><strong>${escapeHtml(group.fact_label)}</strong></span>
         <span><b>${escapeHtml(current.fact_value || '')}</b><small>${escapeHtml(current.effective_date || '')}</small></span>
         <i data-lucide="chevron-down"></i>
       </summary>
       <div class="timeline-versions">
         ${versions.map(version => `<article class="timeline-version ${version.is_current ? 'is-current' : ''}">
           <time>${escapeHtml(version.effective_date)}</time>
-          <div><strong>${escapeHtml(version.fact_value)}</strong><small>${version.is_current ? '现在' : `有效至 ${escapeHtml(version.valid_to || '下一版本')}`} · ${version.source_type === 'mailbox' ? '来自信箱' : version.source_type === 'manual' ? '人工确认' : '来自记忆'}</small></div>
+          <div><strong>${escapeHtml(version.fact_value)}</strong><small>${version.is_current ? '现在仍然有效' : `后来在 ${escapeHtml(version.valid_to || '下一版本')} 发生变化`} · ${version.source_type === 'mailbox' ? '来源：信箱' : version.source_type === 'manual' ? '来源：人工确认' : '来源：记忆桶'}</small></div>
           ${version.source_bucket_id ? `<button class="icon-button" type="button" data-timeline-bucket="${escapeHtml(version.source_bucket_id)}" title="打开来源记忆" aria-label="打开来源记忆"><i data-lucide="external-link"></i></button>` : '<span></span>'}
         </article>`).join('')}
       </div>

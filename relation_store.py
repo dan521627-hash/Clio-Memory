@@ -50,6 +50,18 @@ class RelationStore:
                 )
                 """
             )
+            columns = {
+                row["name"]
+                for row in connection.execute("PRAGMA table_info(relations)")
+            }
+            if "relation_type" not in columns:
+                connection.execute(
+                    "ALTER TABLE relations ADD COLUMN relation_type TEXT NOT NULL DEFAULT 'semantic'"
+                )
+            if "reason" not in columns:
+                connection.execute(
+                    "ALTER TABLE relations ADD COLUMN reason TEXT NOT NULL DEFAULT ''"
+                )
             connection.execute(
                 "CREATE INDEX IF NOT EXISTS idx_relations_left "
                 "ON relations(left_bucket_id, similarity DESC)"
@@ -136,6 +148,39 @@ class RelationStore:
         if not self.enabled:
             return []
         return await asyncio.to_thread(self._related_sync, bucket_id)
+
+    def _related_details_sync(self, bucket_id: str) -> list[dict]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT left_bucket_id, right_bucket_id, similarity,
+                       relation_type, source, reason, created_at
+                FROM relations
+                WHERE left_bucket_id=? OR right_bucket_id=?
+                ORDER BY similarity DESC, left_bucket_id, right_bucket_id
+                """,
+                (bucket_id, bucket_id),
+            ).fetchall()
+        return [
+            {
+                "bucket_id": (
+                    row["right_bucket_id"]
+                    if row["left_bucket_id"] == bucket_id
+                    else row["left_bucket_id"]
+                ),
+                "similarity": float(row["similarity"]),
+                "relation_type": str(row["relation_type"] or "semantic"),
+                "source": str(row["source"] or ""),
+                "reason": str(row["reason"] or ""),
+                "created_at": row["created_at"],
+            }
+            for row in rows
+        ]
+
+    async def related_details(self, bucket_id: str) -> list[dict]:
+        if not self.enabled:
+            return []
+        return await asyncio.to_thread(self._related_details_sync, bucket_id)
 
     def count(self) -> int:
         if not self.enabled:

@@ -504,6 +504,36 @@ class FactTimelineStore:
             return []
         return await asyncio.to_thread(self._versions_for_bucket_sync, bucket_id)
 
+    def _related_buckets_sync(self, bucket_id: str, limit: int) -> list[dict]:
+        """Find other bucket sources that describe versions of the same fact."""
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT DISTINCT
+                    other.source_bucket_id AS bucket_id,
+                    other.fact_key,
+                    other.fact_label,
+                    other.effective_date,
+                    other.is_current
+                FROM fact_versions AS source
+                JOIN fact_versions AS other ON other.fact_key=source.fact_key
+                WHERE source.source_type='bucket'
+                  AND source.source_bucket_id=?
+                  AND other.source_type='bucket'
+                  AND other.source_bucket_id<>''
+                  AND other.source_bucket_id<>?
+                ORDER BY other.is_current DESC, other.effective_date DESC
+                LIMIT ?
+                """,
+                (bucket_id, bucket_id, max(1, min(50, int(limit)))),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    async def related_buckets(self, bucket_id: str, limit: int = 10) -> list[dict]:
+        if not self.enabled:
+            return []
+        return await asyncio.to_thread(self._related_buckets_sync, bucket_id, limit)
+
     def _list_facts_sync(self, search: str, limit: int) -> list[dict]:
         query = re.sub(r"\s+", " ", str(search or "").strip())
         safe_limit = max(1, min(200, int(limit)))

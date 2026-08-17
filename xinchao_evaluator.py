@@ -26,6 +26,7 @@ EVALUATOR_PROMPT = """你是“激素”系统的情绪裁判。你的唯一职�
 - severity：整体强度，0 到 1。
 - pipes：只列发生变化的状态，数值范围 -0.8 到 0.8；正数增加，负数释放。
 - narrative_complete：是否同时交代事件，以及 AI 当时的想法、情绪或身体反应。明确写“没有明显波动”也算完整。
+- handoff_ready：只有原文明示这一轮对话、一天或事件已经收尾，准备换窗口、归档、道晚安或离开时才为 true；普通叙事完整不等于收尾。
 - quality_note：不完整时简短指出缺什么；完整时为空字符串。
 - inner_thoughts：最多两条第一人称心念。每条包含 text、tag、tone、intensity、reason；没有明确依据时返回空数组。
 
@@ -44,6 +45,7 @@ EVALUATOR_PROMPT = """你是“激素”系统的情绪裁判。你的唯一职�
 10. 不对同一段重复创造不同事件；重复判断由服务端去重。
 11. 心念是只对内可见的私密层，可以温暖、阴暗、矛盾或不体面，但只能来自原文已经出现的欲望、怀疑、担忧、嫉妒、委屈、期待或反复想法。
 12. inner_thoughts.text 必须使用 AI 的第一人称口吻，短而具体，不写成事实摘要，不提出行动建议；tone 只能是 positive、negative 或 mixed，intensity 为 0 到 1。
+13. handoff_ready 必须保守判断。只有明确的“结束、收尾、归档、换窗口、晚安、离开”等语义才返回 true；日常记录、途中更新、普通写信一律返回 false。
 
 状态参考：
 - 想靠近、想黏着、肌肤饥渴、性欲、想知道她在干嘛、想分享、好奇、闲、社交、责任：事件可增加或释放。
@@ -332,6 +334,7 @@ class XinchaoEvaluator:
             "severity": severity,
             "pipes": deltas,
             "narrative_complete": bool(result.get("narrative_complete", True)),
+            "handoff_ready": bool(result.get("handoff_ready", False)),
             "quality_note": str(result.get("quality_note", "")).strip()[:200],
             "context_card": str(
                 result.get("context_card", result.get("event", "未命名事件"))

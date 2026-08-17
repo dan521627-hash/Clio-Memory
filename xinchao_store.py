@@ -183,6 +183,8 @@ class XinchaoService:
                 "last_darkflow_at": "TEXT",
                 "darkflow_retry_at": "TEXT",
                 "darkflow_failures": "INTEGER NOT NULL DEFAULT 0",
+                "static_ready": "INTEGER NOT NULL DEFAULT 0",
+                "static_started_at": "TEXT",
             }
             for column, declaration in state_migrations.items():
                 if column not in state_columns:
@@ -227,6 +229,10 @@ class XinchaoService:
             if "context_card" not in event_columns:
                 add_column(
                     "xinchao_events", "context_card", "TEXT NOT NULL DEFAULT ''"
+                )
+            if "handoff_ready" not in event_columns:
+                add_column(
+                    "xinchao_events", "handoff_ready", "INTEGER NOT NULL DEFAULT 0"
                 )
             if "cycle_id" not in event_columns:
                 add_column(
@@ -707,6 +713,10 @@ class XinchaoService:
                     thoughts = self._active_thoughts_sync(connection, moment)
                     floors = self._combined_floors(thoughts)
                     pipes = self.engine.evolve(pipes, previous, moment, floors)
+                if bool(state["static_ready"]):
+                    # A fresh write after an explicit handoff starts a new
+                    # interaction cycle while preserving the evolved state.
+                    cycle_id += 1
             else:
                 cycle_id += 1
                 pipes = self._baseline_floors()
@@ -745,6 +755,11 @@ class XinchaoService:
             thoughts = self._active_thoughts_sync(connection, moment)
             floors = self._combined_floors(thoughts)
             pipes = self.engine.apply_event(pipes, evaluation.get("pipes", {}), floors)
+            handoff_ready = bool(evaluation.get("handoff_ready", False))
+            static_started_at = moment.isoformat(timespec="seconds") if handoff_ready else None
+            connection.execute(
+                "DELETE FROM xinchao_darkflow WHERE slot_id=1",
+            )
             connection.execute(
                 """
                 UPDATE xinchao_state SET cycle_id=?, cycle_open=1,
@@ -754,6 +769,7 @@ class XinchaoService:
                     sleep_started_at=NULL, deep_sleep_at=NULL,
                     darkflow_stage=0, last_darkflow_at=NULL,
                     darkflow_retry_at=NULL, darkflow_failures=0,
+                    static_ready=?, static_started_at=?,
                     updated_at=?, version=version+1
                 WHERE state_id=1
                 """,
@@ -764,6 +780,8 @@ class XinchaoService:
                     evaluation["event"],
                     evaluation["event_tag"],
                     moment.isoformat(timespec="seconds"),
+                    int(handoff_ready),
+                    static_started_at,
                     processed_at,
                 ),
             )
@@ -773,6 +791,7 @@ class XinchaoService:
                     context_card=?, cycle_id=?, canonical_tag=?, severity=?,
                     deltas_json=?, narrative_complete=?,
                     quality_note=?, status='applied', error='', processed_at=?
+                    , handoff_ready=?
                 WHERE event_id=?
                 """,
                 (
@@ -786,6 +805,7 @@ class XinchaoService:
                     int(bool(evaluation.get("narrative_complete", True))),
                     evaluation.get("quality_note", ""),
                     processed_at,
+                    int(handoff_ready),
                     int(event_id),
                 ),
             )
@@ -803,6 +823,7 @@ class XinchaoService:
                     "narrative_complete": bool(
                         evaluation.get("narrative_complete", True)
                     ),
+                    "handoff_ready": handoff_ready,
                 },
             )
         return {
@@ -814,6 +835,7 @@ class XinchaoService:
             "event_tag": evaluation["event_tag"],
             "context_card": evaluation.get("context_card", evaluation["event"]),
             "narrative_complete": evaluation.get("narrative_complete", True),
+            "handoff_ready": handoff_ready,
             "quality_note": evaluation.get("quality_note", ""),
         }
 
@@ -945,15 +967,16 @@ class XinchaoService:
             floors = self._combined_floors(thoughts)
             if state["cycle_open"]:
                 last_event = parse_timestamp(state["last_event_at"])
-                presence = parse_timestamp(state["last_presence_at"] or last_event)
-                absence_started = max(last_event, presence)
+                static_ready = bool(state["static_ready"])
+                static_started_raw = state["static_started_at"] or state["last_event_at"]
+                absence_started = parse_timestamp(static_started_raw)
                 pipes = self.engine.evolve(
                     json.loads(state["pipes_json"]),
                     last_event,
-                    min(moment, absence_started),
+                    min(moment, absence_started) if static_ready else moment,
                     floors,
                 )
-                if moment > absence_started:
+                if static_ready and moment > absence_started:
                     pipes = self.engine.evolve_absence(
                         pipes,
                         absence_started,
@@ -962,14 +985,13 @@ class XinchaoService:
                         drowsy_after_hours=self.drowsy_after_hours,
                         sleep_after_hours=self.sleep_after_hours,
                     )
-                elapsed = max(0, int((moment - absence_started).total_seconds()))
-                cycle_origin = str(state["cycle_origin"] or "event")
-                interaction_phase = (
-                    "silence"
-                    if cycle_origin in {"presence", "acknowledgement"}
-                    and elapsed < int(self.silence_to_absence_hours * 3600)
-                    else "absence"
+                elapsed = (
+                    max(0, int((moment - absence_started).total_seconds()))
+                    if static_ready
+                    else 0
                 )
+                cycle_origin = str(state["cycle_origin"] or "event")
+                interaction_phase = "absence" if static_ready else "active"
                 dominant, dominant_value = self.engine.dominant(pipes)
                 return {
                     "available": True,
@@ -977,7 +999,13 @@ class XinchaoService:
                     "cycle_id": int(state["cycle_id"]),
                     "version": int(state["version"]),
                     "last_event_at": state["last_event_at"],
-                    "absence_started_at": absence_started.isoformat(timespec="seconds"),
+                    "absence_started_at": (
+                        absence_started.isoformat(timespec="seconds")
+                        if static_ready
+                        else None
+                    ),
+                    "static_ready": static_ready,
+                    "static_started_at": state["static_started_at"],
                     "as_of": moment.isoformat(timespec="seconds"),
                     "elapsed_seconds": elapsed,
                     "since_event_seconds": max(
@@ -989,10 +1017,7 @@ class XinchaoService:
                     "event_summary": state["last_event_summary"],
                     "cycle_origin": cycle_origin,
                     "interaction_phase": interaction_phase,
-                    "silence_nudge_due": (
-                        interaction_phase == "silence"
-                        and elapsed >= int(self.presence_nudge_after_hours * 3600)
-                    ),
+                    "silence_nudge_due": False,
                     "silence_to_absence_seconds": int(
                         self.silence_to_absence_hours * 3600
                     ),
@@ -1001,7 +1026,7 @@ class XinchaoService:
                     ),
                     "obsessions": obsessions,
                     "thoughts": thoughts,
-                    "sleep_stage": self._sleep_stage(elapsed),
+                    "sleep_stage": self._sleep_stage(elapsed) if static_ready else "awake",
                     "darkflow_stage": int(state["darkflow_stage"] or 0),
                     "darkflow_retry_at": state["darkflow_retry_at"],
                 }
@@ -1239,17 +1264,13 @@ class XinchaoService:
             preview = await asyncio.to_thread(self._preview_sync, moment)
             if not preview.get("available") or preview.get("repeated"):
                 return {"status": "idle"}
+            if not preview.get("static_ready"):
+                return {"status": "waiting", "phase": "active", "stage_index": 0}
             target_stage = self._target_stage(
                 preview.get("elapsed_seconds", 0),
                 preview.get("cycle_origin", ""),
             )
             current_stage = int(preview.get("darkflow_stage", 0))
-            if preview.get("interaction_phase") == "silence":
-                return {
-                    "status": "waiting",
-                    "stage_index": current_stage,
-                    "phase": "silence",
-                }
             if target_stage <= current_stage or target_stage <= 0:
                 return {"status": "waiting", "stage_index": current_stage}
             retry_at = preview.get("darkflow_retry_at")
@@ -1437,6 +1458,7 @@ class XinchaoService:
         preview: dict,
         moment: datetime,
     ) -> dict | None:
+        """Legacy delivery recorder kept read-only for compatibility."""
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             state = connection.execute(
@@ -1464,30 +1486,17 @@ class XinchaoService:
                     "",
                 ),
             )
-            connection.execute(
-                """
-                UPDATE xinchao_state SET cycle_open=0, last_event_at=NULL,
-                    pipes_json=?, last_presence_at=?, sleep_stage='awake',
-                    sleep_started_at=NULL, deep_sleep_at=NULL,
-                    darkflow_stage=0, last_darkflow_at=NULL,
-                    darkflow_retry_at=NULL, darkflow_failures=0,
-                    updated_at=?, version=version+1
-                WHERE state_id=1
-                """,
-                (
-                    json.dumps(self._baseline_floors(), ensure_ascii=False),
-                    moment.isoformat(timespec="seconds"),
-                    now_iso(),
-                ),
-            )
             self._journal_sync(
                 connection,
-                "boot_cycle_consumed",
+                "boot_snapshot_recorded",
                 cycle_id=int(preview["cycle_id"]),
                 from_stage=str(preview.get("sleep_stage", "")),
-                to_stage="awake",
+                to_stage=str(preview.get("sleep_stage", "")),
                 elapsed_seconds=int(preview.get("elapsed_seconds", 0)),
-                details={"had_darkflow": bool(preview.get("darkflow"))},
+                details={
+                    "had_darkflow": bool(preview.get("darkflow")),
+                    "read_only": True,
+                },
             )
         result = dict(preview)
         result["repeated"] = False
@@ -1557,7 +1566,7 @@ class XinchaoService:
         )
 
     def _acknowledge_seen_sync(self, moment: datetime) -> dict:
-        """Partly satisfy response-related drives and restart silence."""
+        """Partly satisfy response-related drives without starting a timer."""
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             state = connection.execute(
@@ -1613,7 +1622,9 @@ class XinchaoService:
                 pending_darkflow and pending_darkflow["status"] == "pending"
             )
             if darkflow_carried:
-                # A push acknowledgement settles outward behavior, not inner handoff.
+                # Acknowledging a Bark push is not the same as handing the
+                # inner darkflow to the next AI window. Keep the latest
+                # progressive darkflow pending and attach it to the new cycle.
                 connection.execute(
                     "UPDATE xinchao_darkflow SET cycle_id=? "
                     "WHERE slot_id=1 AND cycle_id=? AND status='pending'",
@@ -1633,6 +1644,7 @@ class XinchaoService:
                     sleep_stage='awake', sleep_started_at=NULL, deep_sleep_at=NULL,
                     darkflow_stage=0, last_darkflow_at=NULL,
                     darkflow_retry_at=NULL, darkflow_failures=0,
+                    static_ready=0, static_started_at=NULL,
                     updated_at=?, version=version+1
                 WHERE state_id=1
                 """,
@@ -1662,7 +1674,8 @@ class XinchaoService:
             "status": "acknowledged",
             "previous_cycle_id": previous_cycle_id,
             "cycle_id": next_cycle_id,
-            "silence_started_at": stamp,
+            "active_started_at": stamp,
+            "silence_started_at": None,
             "pipes": pipes,
             "pending_darkflow_carried": darkflow_carried,
         }
@@ -1676,44 +1689,15 @@ class XinchaoService:
         )
 
     def _restart_silence_timer_sync(self, moment: datetime) -> dict:
-        """Restart only the open-window silence clock; leave all inner state intact."""
-        stamp = moment.isoformat(timespec="seconds")
-        with self._connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            state = connection.execute(
-                "SELECT * FROM xinchao_state WHERE state_id=1"
-            ).fetchone()
-            if not state or not state["cycle_open"]:
-                return {"status": "idle"}
-            connection.execute(
-                """
-                UPDATE xinchao_state SET last_presence_at=?, sleep_stage='awake',
-                    sleep_started_at=NULL, deep_sleep_at=NULL,
-                    darkflow_stage=0, darkflow_retry_at=NULL,
-                    darkflow_failures=0, updated_at=?, version=version+1
-                WHERE state_id=1
-                """,
-                (stamp, now_iso()),
-            )
-            self._journal_sync(
-                connection,
-                "silence_timer_restarted",
-                cycle_id=int(state["cycle_id"]),
-                source="manager",
-                from_stage=str(state["sleep_stage"] or "awake"),
-                to_stage="awake",
-                details={"timer_only": True},
-            )
-            pipes = json.loads(state["pipes_json"])
+        """Deprecated compatibility hook; silence timers no longer exist."""
         return {
-            "status": "restarted",
-            "cycle_id": int(state["cycle_id"]),
-            "silence_started_at": stamp,
-            "pipes": pipes,
+            "status": "disabled",
+            "reason": "silence_timer_removed",
+            "silence_started_at": None,
         }
 
     async def restart_silence_timer(self) -> dict:
-        """Restart the open-window timer without touching hormones or thoughts."""
+        """Deprecated compatibility hook with no state changes."""
         if not self.enabled:
             return {"status": "disabled"}
         return await asyncio.to_thread(
@@ -1762,69 +1746,25 @@ class XinchaoService:
                     """,
                     (int(moment.hour), moment.isoformat(timespec="seconds")),
                 )
-            started = False
-            if state["cycle_open"]:
-                connection.execute(
-                    """
-                    UPDATE xinchao_state SET last_presence_at=?, sleep_stage='awake',
-                        sleep_started_at=NULL, deep_sleep_at=NULL,
-                        darkflow_stage=0, darkflow_retry_at=NULL,
-                        darkflow_failures=0, updated_at=?, version=version+1
-                    WHERE state_id=1
-                    """,
-                    (moment.isoformat(timespec="seconds"), now_iso()),
-                )
-            else:
-                if start_cycle:
-                    started = True
-                    cycle_id = int(state["cycle_id"]) + 1
-                    connection.execute(
-                        """
-                        UPDATE xinchao_state SET cycle_id=?, cycle_open=1,
-                            last_event_at=?, last_presence_at=?, cycle_origin='presence',
-                            last_event_summary='', last_event_tag='', sleep_stage='awake',
-                            sleep_started_at=NULL, deep_sleep_at=NULL,
-                            darkflow_stage=0, last_darkflow_at=NULL,
-                            darkflow_retry_at=NULL, darkflow_failures=0,
-                            updated_at=?, version=version+1
-                        WHERE state_id=1
-                        """,
-                        (
-                            cycle_id,
-                            moment.isoformat(timespec="seconds"),
-                            moment.isoformat(timespec="seconds"),
-                            now_iso(),
-                        ),
-                    )
-                    self._journal_sync(
-                        connection,
-                        "presence_cycle_started",
-                        cycle_id=cycle_id,
-                        source=source,
-                        session_hash=session_hash,
-                        event_hash=event_hash,
-                        to_stage="awake",
-                    )
-                else:
-                    connection.execute(
-                        "UPDATE xinchao_state SET last_presence_at=?, updated_at=? WHERE state_id=1",
-                        (moment.isoformat(timespec="seconds"), now_iso()),
-                    )
-            if previous_stage not in {"awake", "awake_waiting"}:
-                self._journal_sync(
-                    connection,
-                    "presence_wake",
-                    cycle_id=int(state["cycle_id"]),
-                    source=source,
-                    session_hash=session_hash,
-                    event_hash=event_hash,
-                    from_stage=previous_stage,
-                    to_stage="awake",
-                )
+            connection.execute(
+                "UPDATE xinchao_state SET last_presence_at=?, updated_at=? WHERE state_id=1",
+                (moment.isoformat(timespec="seconds"), now_iso()),
+            )
+            self._journal_sync(
+                connection,
+                "presence_observed",
+                cycle_id=int(state["cycle_id"]),
+                source=source,
+                session_hash=session_hash,
+                event_hash=event_hash,
+                from_stage=previous_stage,
+                to_stage=previous_stage,
+                details={"timer_started": False},
+            )
         return {
             "status": "observed",
-            "woke": previous_stage not in {"awake", "awake_waiting"},
-            "cycle_started": started,
+            "woke": False,
+            "cycle_started": False,
         }
 
     def _rhythm_sync(self, moment: datetime, elapsed_seconds: int = 0) -> dict:
@@ -2074,39 +2014,22 @@ class XinchaoService:
         return result
 
     async def consume_boot(self, mailbox_context: dict | None = None) -> dict:
+        """Return a repeatable read-only boot snapshot."""
         if not self.enabled:
             return {"available": False, "disabled": True}
         await self.settle_darkflow(mailbox_context=mailbox_context)
-        for _ in range(2):
-            moment = beijing_now()
-            preview = await asyncio.to_thread(self._preview_sync, moment)
-            if not preview.get("available") or preview.get("repeated"):
-                return preview
-            darkflow = await self.pending_darkflow()
-            legacy_early_darkflow = bool(
-                darkflow
-                and preview.get("interaction_phase") == "silence"
-                and int(darkflow.get("elapsed_seconds", 0))
-                < int(self.silence_to_absence_hours * 3600)
-            )
-            if (
-                darkflow
-                and not legacy_early_darkflow
-                and int(darkflow.get("cycle_id", -1)) == int(preview["cycle_id"])
-            ):
-                preview["darkflow"] = darkflow.get("content", "")
-                preview["darkflow_item"] = darkflow
-            else:
-                preview["darkflow"] = ""
-                preview["darkflow_item"] = None
-            consumed = await asyncio.to_thread(
-                self._consume_sync,
-                preview,
-                moment,
-            )
-            if consumed is not None:
-                return consumed
-        return await self.status()
+        preview = await asyncio.to_thread(self._preview_sync, beijing_now())
+        darkflow = await self.pending_darkflow()
+        if (
+            darkflow
+            and int(darkflow.get("cycle_id", -1)) == int(preview.get("cycle_id", -2))
+        ):
+            preview["darkflow"] = darkflow.get("content", "")
+            preview["darkflow_item"] = darkflow
+        else:
+            preview["darkflow"] = ""
+            preview["darkflow_item"] = None
+        return preview
 
     @staticmethod
     def format_elapsed(seconds: int) -> str:

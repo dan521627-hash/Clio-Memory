@@ -1562,6 +1562,12 @@ async def behavior_actions(
     }
 
 
+@app.get("/api/behavior/pending")
+async def behavior_pending() -> dict:
+    """Expose acknowledgement state without repeating push plaintext."""
+    return await behavior_service.store.pending_handoff_summary()
+
+
 @app.get("/api/behavior/settings")
 async def behavior_settings() -> dict:
     return {"push_title": await behavior_service.push_title()}
@@ -1576,34 +1582,29 @@ async def update_behavior_settings(payload: BehaviorSettingsUpdate) -> dict:
     return {"push_title": title, "saved": True}
 
 
-@app.get("/api/behavior/pending")
-async def behavior_pending() -> dict:
-    """Expose acknowledgement state without repeating push plaintext."""
-    return await behavior_service.store.pending_handoff_summary()
-
-
 @app.post("/api/behavior/acknowledge")
 async def acknowledge_behavior(
     payload: BehaviorAcknowledgeRequest | None = None,
 ) -> dict:
-    """Dismiss a silence timer nudge or acknowledge one stateful absence push."""
+    """Acknowledge all currently visible pushes in one atomic action."""
     acknowledged = await behavior_service.store.acknowledge_pending(
         payload.action_id if payload else 0
     )
     if acknowledged.get("status") == "empty":
         return {"status": "empty", "message": "当前没有等待确认的推送。"}
-    if acknowledged.get("phase") == "silence":
-        state = await xinchao_service.restart_silence_timer()
+    silence_ids = acknowledged.get("silence_action_ids", [])
+    stateful_ids = acknowledged.get("stateful_action_ids", [])
+    if silence_ids:
         await behavior_service.store.purge_handoff(
-            acknowledged.get("silence_action_ids", [])
+            silence_ids
         )
+    if not stateful_ids:
         return {
             "status": "acknowledged",
-            "phase": "silence",
-            "message": "知道了，只重新计算沉默时间；情绪、激素、心念和暗涌都没有改动。",
+            "phase": "legacy_silence",
+            "message": "已经清掉旧版沉默提醒；它不会影响激素、心念或暗涌。",
             "acknowledged_at": acknowledged.get("acknowledged_at"),
             "count": acknowledged.get("count", 0),
-            "silence_started_at": state.get("silence_started_at"),
         }
 
     state = await xinchao_service.acknowledge_seen()
@@ -1613,10 +1614,10 @@ async def acknowledge_behavior(
     return {
         "status": "acknowledged",
         "phase": "absence",
-        "message": "已经告诉他你看到了；想念和靠近会缓下来一点，但其他感受仍然保留，并从现在重新开始沉默计时。",
+        "message": "已经一次告诉他：这些推送你都看到了。想念和靠近会缓下来一点，其他感受仍然保留；不会另开沉默倒计时。",
         "acknowledged_at": acknowledged.get("acknowledged_at"),
         "count": acknowledged.get("count", 0),
-        "silence_started_at": state.get("silence_started_at"),
+        "active_started_at": state.get("active_started_at"),
     }
 
 

@@ -327,24 +327,25 @@ class BehaviorStore:
         stamp = now_iso()
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            if int(action_id) > 0:
-                rows = connection.execute(
+            cutoff = int(action_id)
+            if cutoff <= 0:
+                latest = connection.execute(
                     """
-                    SELECT * FROM behavior_actions
-                    WHERE action_id=? AND status='sent'
-                        AND handoff_status='pending' AND acknowledged_at IS NULL
-                    """,
-                    (int(action_id),),
-                ).fetchall()
-            else:
-                rows = connection.execute(
-                    """
-                    SELECT * FROM behavior_actions
+                    SELECT MAX(action_id) AS action_id FROM behavior_actions
                     WHERE status='sent' AND handoff_status='pending'
                         AND acknowledged_at IS NULL
-                    ORDER BY action_id DESC LIMIT 1
                     """
-                ).fetchall()
+                ).fetchone()
+                cutoff = int(latest["action_id"] or 0) if latest else 0
+            rows = connection.execute(
+                """
+                SELECT * FROM behavior_actions
+                WHERE action_id<=? AND status='sent'
+                    AND handoff_status='pending' AND acknowledged_at IS NULL
+                ORDER BY action_id ASC
+                """,
+                (cutoff,),
+            ).fetchall() if cutoff > 0 else []
             if not rows:
                 return {
                     "status": "empty",
@@ -393,7 +394,7 @@ class BehaviorStore:
         }
 
     async def acknowledge_pending(self, action_id: int = 0) -> dict:
-        """Acknowledge one visible Bark action and report its interaction phase."""
+        """Acknowledge every pending Bark action up to the visible cutoff."""
         return await asyncio.to_thread(self._acknowledge_pending_sync, action_id)
 
     @staticmethod
