@@ -7,7 +7,7 @@
   <meta name="theme-color" content="#c9644e">
   <title>Clio 记忆管理</title>
   <link rel="stylesheet" href="manager.css?v=20260813-push-title-1">
-  <link rel="stylesheet" href="immersive-house.css?v=20260814-optical-2">
+  <link rel="stylesheet" href="immersive-house.css?v=20260817-desktop-house-1">
 </head>
 <body class="is-opening">
   <div class="manager-opening" id="managerOpening" role="status" aria-live="polite">
@@ -64,7 +64,7 @@
         <form class="push-title-setting" id="pushTitleSetting">
           <i data-lucide="bell-ring" aria-hidden="true"></i>
           <label for="pushTitleInput"><strong>推送署名</strong><small>以后 Bark 通知顶部显示的名字</small></label>
-                <input id="pushTitleInput" maxlength="60" autocomplete="off" placeholder="例如：我的 AI" required>
+          <input id="pushTitleInput" maxlength="60" autocomplete="off" placeholder="例如：我的 AI" required>
           <button type="submit" title="保存推送署名" aria-label="保存推送署名"><i data-lucide="check"></i></button>
           <span id="pushTitleStatus" role="status"></span>
         </form>
@@ -136,6 +136,46 @@
         <i data-lucide="waves"></i><span>屋里有一封新的暗涌</span>
       </button>
     </section>
+
+    <aside class="desktop-house-companion" aria-label="Clio 电脑端小屋入口">
+      <header class="desktop-house-intro">
+        <small>CLIO · DESKTOP MEMORY HOUSE</small>
+        <h2>今天，从哪一间继续</h2>
+        <p id="desktopHousePhrase">我把走过的事留在这里。下一次见面，我们从这里继续。</p>
+        <span id="desktopHouseGreeting">正在把今天的房间轻轻打开</span>
+      </header>
+
+      <section class="desktop-house-current" aria-label="此刻状态">
+        <button class="desktop-emotion-entry" type="button" id="desktopEmotionTicket">
+          <span><i data-lucide="activity"></i>此刻</span>
+          <strong id="desktopEmotionName">安静</strong>
+          <b id="desktopEmotionValue">0.00</b>
+          <small id="desktopEmotionElapsed">刚刚开始</small>
+        </button>
+        <aside class="desktop-push-acknowledgement" id="desktopPushAck" hidden>
+          <div><i data-lucide="send"></i><span><strong>他刚刚来找过你</strong><small id="desktopPushTime">等待你回应</small></span></div>
+          <button type="button" id="desktopAcknowledgePush">我看到了</button>
+        </aside>
+        <button class="desktop-darkflow-link" type="button" id="desktopDarkflowLink" hidden>
+          <i data-lucide="waves"></i><span>屋里有一封新的暗涌</span>
+        </button>
+      </section>
+
+      <nav class="desktop-room-list" aria-label="小屋房间">
+        <button type="button" data-house-route="topics"><i data-lucide="book-open"></i><span><strong>记忆书房</strong><small><b id="desktopMemoryCount">0</b> 篇记忆，按主题慢慢翻</small></span><i data-lucide="arrow-up-right"></i></button>
+        <button type="button" data-house-route="mailbox"><i data-lucide="mail"></i><span><strong>信箱</strong><small>接住上一个窗口留下的话</small></span><i data-lucide="arrow-up-right"></i></button>
+        <button type="button" data-house-route="calendar"><i data-lucide="calendar-days"></i><span><strong>记忆日历</strong><small>沿着日期找回那一天</small></span><i data-lucide="arrow-up-right"></i></button>
+        <button type="button" data-house-route="tasks"><i data-lucide="circle-check-big"></i><span><strong>未竟事项</strong><small><b id="desktopTaskCount">0</b> 件事还等着落地</small></span><i data-lucide="arrow-up-right"></i></button>
+        <button type="button" data-house-route="thoughts"><i data-lucide="sparkles"></i><span><strong>心念</strong><small>看看那些没说出口的念头</small></span><i data-lucide="arrow-up-right"></i></button>
+        <button type="button" data-house-route="resonance"><i data-lucide="orbit"></i><span><strong>共振与张力</strong><small>看此刻为什么被牵动</small></span><i data-lucide="arrow-up-right"></i></button>
+      </nav>
+
+      <footer class="desktop-house-shortcuts">
+        <button type="button" data-desktop-nav="searchNav"><i data-lucide="search"></i>智能搜索</button>
+        <button type="button" data-desktop-nav="timelineNav"><i data-lucide="history"></i>时间线</button>
+        <button type="button" data-desktop-nav="settingsNav"><i data-lucide="settings-2"></i>设置</button>
+      </footer>
+    </aside>
   </main>
 
   <div class="manager-shell">
@@ -839,6 +879,6 @@
   <div class="toast" id="managerToast" role="status"></div>
 
   <script src="lucide.min.js"></script>
-  <script src="manager.js?v=20260813-push-title-1"></script>
+  <script src="manager.js?v=20260817-desktop-house-1"></script>
 </body>
 </html>

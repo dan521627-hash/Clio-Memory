@@ -167,6 +167,10 @@ async function loadStats() {
   document.querySelector('#quickArchivedCount').textContent = stats.sealed;
   document.querySelector('#houseMemoryCount').textContent = stats.total;
   document.querySelector('#houseTaskCount').textContent = stats.todo || 0;
+  const desktopMemoryCount = document.querySelector('#desktopMemoryCount');
+  const desktopTaskCount = document.querySelector('#desktopTaskCount');
+  if (desktopMemoryCount) desktopMemoryCount.textContent = stats.total;
+  if (desktopTaskCount) desktopTaskCount.textContent = stats.todo || 0;
 }
 
 function datetimeLocalValue(value = '') {
@@ -231,35 +235,61 @@ function renderHouseGreeting() {
         : hour < 18 ? '下午好，记忆都安静放在原处'
           : '晚上好，屋里一直给你留着位置';
   document.querySelector('#houseGreeting').textContent = greeting;
+  const desktopGreeting = document.querySelector('#desktopHouseGreeting');
+  if (desktopGreeting) desktopGreeting.textContent = greeting;
 }
 
 function renderHouseHormone(result = {}) {
   const available = Boolean(result.available) && !result.disabled;
-  document.querySelector('#houseEmotionName').textContent = available ? (result.dominant || '平静') : '安静';
-  document.querySelector('#houseEmotionValue').textContent = Number(available ? result.dominant_value : 0).toFixed(2);
-  document.querySelector('#houseEmotionElapsed').textContent = available
+  const name = available ? (result.dominant || '平静') : '安静';
+  const value = Number(available ? result.dominant_value : 0).toFixed(2);
+  const elapsed = available
     ? `沉默了 ${elapsedLabel(result.elapsed_seconds)}`
     : '还没有开始新的沉默周期';
+  document.querySelector('#houseEmotionName').textContent = name;
+  document.querySelector('#houseEmotionValue').textContent = value;
+  document.querySelector('#houseEmotionElapsed').textContent = elapsed;
+  const desktopName = document.querySelector('#desktopEmotionName');
+  const desktopValue = document.querySelector('#desktopEmotionValue');
+  const desktopElapsed = document.querySelector('#desktopEmotionElapsed');
+  if (desktopName) desktopName.textContent = name;
+  if (desktopValue) desktopValue.textContent = value;
+  if (desktopElapsed) desktopElapsed.textContent = elapsed;
 }
 
 function renderHousePendingPush(result = {}) {
   state.pendingPush = result;
   const panel = document.querySelector('#housePushAck');
   const button = document.querySelector('#acknowledgePush');
+  const desktopPanel = document.querySelector('#desktopPushAck');
+  const desktopButton = document.querySelector('#desktopAcknowledgePush');
   if (!result.available || result.acknowledged) {
     panel.hidden = true;
     button.disabled = false;
     button.textContent = '我看到了';
+    if (desktopPanel) desktopPanel.hidden = true;
+    if (desktopButton) {
+      desktopButton.disabled = false;
+      desktopButton.textContent = '我看到了';
+    }
     return;
   }
   panel.hidden = false;
+  if (desktopPanel) desktopPanel.hidden = false;
   const latest = result.latest || {};
   const countText = Number(result.count || 0) > 1 ? `，共 ${result.count} 条` : '';
-  document.querySelector('#housePushTime').textContent = latest.delivered_at
+  const pushTime = latest.delivered_at
     ? `${displayDate(latest.delivered_at)} 发出${countText}`
     : `有一条推送等待交接${countText}`;
+  document.querySelector('#housePushTime').textContent = pushTime;
+  const desktopPushTime = document.querySelector('#desktopPushTime');
+  if (desktopPushTime) desktopPushTime.textContent = pushTime;
   button.disabled = false;
   button.textContent = latest.phase === 'silence' ? '我知道了' : '我看到了';
+  if (desktopButton) {
+    desktopButton.disabled = false;
+    desktopButton.textContent = button.textContent;
+  }
 }
 
 async function loadHouse() {
@@ -274,11 +304,14 @@ async function loadHouse() {
   ]);
   const housePromise = document.querySelector('.house-promise');
   if (housePromise && phrase?.text) housePromise.textContent = phrase.text;
+  const desktopHousePhrase = document.querySelector('#desktopHousePhrase');
+  if (desktopHousePhrase && phrase?.text) desktopHousePhrase.textContent = phrase.text;
   renderHouseHormone(hormone);
   renderHousePendingPush(pendingPush);
-  document.querySelector('#houseDarkflowLink').hidden = !(
-    darkflow?.item && darkflow.item.status === 'pending'
-  );
+  const hasDarkflow = Boolean(darkflow?.item && darkflow.item.status === 'pending');
+  document.querySelector('#houseDarkflowLink').hidden = !hasDarkflow;
+  const desktopDarkflowLink = document.querySelector('#desktopDarkflowLink');
+  if (desktopDarkflowLink) desktopDarkflowLink.hidden = !hasDarkflow;
 }
 
 async function showHomeView() {
@@ -292,8 +325,12 @@ async function showHomeView() {
 async function acknowledgePush() {
   const button = document.querySelector('#acknowledgePush');
   const panel = document.querySelector('#housePushAck');
+  const desktopButton = document.querySelector('#desktopAcknowledgePush');
+  const desktopPanel = document.querySelector('#desktopPushAck');
   button.disabled = true;
   panel.hidden = true;
+  if (desktopButton) desktopButton.disabled = true;
+  if (desktopPanel) desktopPanel.hidden = true;
   try {
     const actionId = Number(state.pendingPush?.latest?.action_id || 0);
     const result = await api('/api/behavior/acknowledge', {
@@ -305,6 +342,8 @@ async function acknowledgePush() {
   } catch (error) {
     button.disabled = false;
     panel.hidden = false;
+    if (desktopButton) desktopButton.disabled = false;
+    if (desktopPanel) desktopPanel.hidden = false;
     toast(error.message, true);
   }
 }
@@ -2055,10 +2094,20 @@ document.querySelectorAll('[data-house-route]').forEach(button => {
 document.querySelector('#houseEmotionTicket').addEventListener('click', () => {
   showHormoneView().catch(error => toast(error.message, true));
 });
+document.querySelector('#desktopEmotionTicket')?.addEventListener('click', () => {
+  showHormoneView().catch(error => toast(error.message, true));
+});
 document.querySelector('#houseDarkflowLink').addEventListener('click', () => {
   showDarkflowView().catch(error => toast(error.message, true));
 });
+document.querySelector('#desktopDarkflowLink')?.addEventListener('click', () => {
+  showDarkflowView().catch(error => toast(error.message, true));
+});
 document.querySelector('#acknowledgePush').addEventListener('click', acknowledgePush);
+document.querySelector('#desktopAcknowledgePush')?.addEventListener('click', acknowledgePush);
+document.querySelectorAll('[data-desktop-nav]').forEach(button => {
+  button.addEventListener('click', () => document.querySelector(`#${button.dataset.desktopNav}`)?.click());
+});
 document.querySelector('#topicBackToMain').addEventListener('click', returnToTopicMain);
 document.querySelector('#topicBackToSubs').addEventListener('click', returnToTopicSubs);
 document.querySelector('#refreshTopics').addEventListener('click', () => {
