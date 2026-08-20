@@ -81,20 +81,34 @@ def build_calendar_day(
                     "note": _summary(segment.get("content", "")),
                 }
             )
-        metadata_dates = {
-            str(created)[:10]: "memory_created",
-            str(metadata.get("last_active", ""))[:10]: "memory_updated",
-            str(metadata.get("trigger_date", ""))[:10]: "memory_trigger",
-        }
-        metadata_kind = metadata_dates.get(target)
-        if metadata_kind and not matching_segments:
+        # Reading, searching, or editing metadata may update ``last_active``.
+        # That is usage telemetry, not a memory event, so it must never pollute
+        # the day calendar. A bucket contributes its dated text segments; only
+        # legacy buckets without a dated segment fall back to their create date.
+        metadata_kind = (
+            "memory_created"
+            if str(created)[:10] == target and not matching_segments
+            else ""
+        )
+        if metadata_kind:
             entries.append(
                 {
                     "kind": metadata_kind,
                     "id": bucket_id,
                     "title": title,
-                    "time": _calendar_time(metadata.get("last_active") or created or target),
+                    "time": _calendar_time(created or target),
                     "note": _summary(segments[-1].get("content", "")),
+                }
+            )
+        trigger_date = str(metadata.get("trigger_date", ""))[:10]
+        if trigger_date == target:
+            entries.append(
+                {
+                    "kind": "memory_trigger",
+                    "id": bucket_id,
+                    "title": title,
+                    "time": _calendar_time(target),
+                    "note": "前瞻记忆在这一天触发",
                 }
             )
 

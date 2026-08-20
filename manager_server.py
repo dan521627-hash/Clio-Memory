@@ -459,10 +459,6 @@ class BehaviorAcknowledgeRequest(BaseModel):
     action_id: int = Field(default=0, ge=0)
 
 
-class BehaviorSettingsUpdate(BaseModel):
-    push_title: str = Field(min_length=1, max_length=60)
-
-
 class JudgeRelation(BaseModel):
     name: str = Field(min_length=1, max_length=80)
     aliases: list[str] = Field(default_factory=list)
@@ -1566,20 +1562,6 @@ async def behavior_actions(
 async def behavior_pending() -> dict:
     """Expose acknowledgement state without repeating push plaintext."""
     return await behavior_service.store.pending_handoff_summary()
-
-
-@app.get("/api/behavior/settings")
-async def behavior_settings() -> dict:
-    return {"push_title": await behavior_service.push_title()}
-
-
-@app.put("/api/behavior/settings")
-async def update_behavior_settings(payload: BehaviorSettingsUpdate) -> dict:
-    try:
-        title = await behavior_service.set_push_title(payload.push_title)
-    except ValueError as error:
-        raise HTTPException(status_code=400, detail=str(error)) from error
-    return {"push_title": title, "saved": True}
 
 
 @app.post("/api/behavior/acknowledge")

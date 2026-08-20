@@ -155,6 +155,7 @@ class XinchaoEngine:
         end: str | datetime | None = None,
         floors: dict | None = None,
         growth_multiplier: float = 1.0,
+        plateaus: dict[str, str | datetime] | None = None,
     ) -> dict[str, float]:
         result = normalize_pipes(pipes)
         cursor = parse_timestamp(start)
@@ -189,6 +190,9 @@ class XinchaoEngine:
             for name, raw_rate in self.growth.items():
                 if name not in result:
                     continue
+                plateau_until = (plateaus or {}).get(name)
+                if plateau_until and midpoint < parse_timestamp(plateau_until):
+                    continue
                 rate = (
                     max(0.0, float(raw_rate))
                     * period
@@ -206,11 +210,19 @@ class XinchaoEngine:
                 result[name] += rate * hours
 
             # Cascades are rates, not instant jumps, so long gaps stay bounded.
-            if growth_scale > 0 and result["想靠近"] > 0.3:
+            if (
+                growth_scale > 0
+                and result["想靠近"] > 0.3
+                and not self._plateaued("想黏着", midpoint, plateaus)
+            ):
                 result["想黏着"] += (
                     result["想靠近"] * 0.030 * period * hours * growth_scale
                 )
-            if growth_scale > 0 and result["想靠近"] > 0.4:
+            if (
+                growth_scale > 0
+                and result["想靠近"] > 0.4
+                and not self._plateaued("肌肤饥渴", midpoint, plateaus)
+            ):
                 skin_rate = result["想靠近"] * 0.025 * period
                 if result["满足"] > 0.3:
                     skin_rate *= 0.7
@@ -219,8 +231,13 @@ class XinchaoEngine:
             libido_rate *= max(0.0, 1.0 - 0.7 * result["难过"] - 0.7 * result["生气"])
             if result["满足"] > 0.3:
                 libido_rate *= 0.5
-            result["性欲"] += libido_rate * hours * growth_scale
-            if growth_scale > 0 and result["难过"] > 0.3:
+            if not self._plateaued("性欲", midpoint, plateaus):
+                result["性欲"] += libido_rate * hours * growth_scale
+            if (
+                growth_scale > 0
+                and result["难过"] > 0.3
+                and not self._plateaued("想靠近", midpoint, plateaus)
+            ):
                 result["想靠近"] += result["难过"] * 0.015 * hours * growth_scale
             if result["自省"] > 0.5:
                 result["生气"] *= math.pow(0.5, hours / 0.5)
@@ -236,12 +253,22 @@ class XinchaoEngine:
 
         return self._clamp(result)
 
+    @staticmethod
+    def _plateaued(
+        name: str,
+        moment: datetime,
+        plateaus: dict[str, str | datetime] | None,
+    ) -> bool:
+        until = (plateaus or {}).get(name)
+        return bool(until and moment < parse_timestamp(until))
+
     def evolve_absence(
         self,
         pipes: dict | None,
         start: str | datetime,
         end: str | datetime | None = None,
         floors: dict | None = None,
+        plateaus: dict[str, str | datetime] | None = None,
         *,
         drowsy_after_hours: float = 4.0,
         sleep_after_hours: float = 7.0,
@@ -272,6 +299,7 @@ class XinchaoEngine:
                 phase_end,
                 floors,
                 growth_multiplier=multiplier,
+                plateaus=plateaus,
             )
             cursor = phase_end
             if cursor >= finish:

@@ -51,6 +51,10 @@ class XinchaoService:
             self.flash_hours, float(settings.get("obsession_hours", 168.0))
         )
         self.obsession_repeats = max(2, int(settings.get("obsession_repeats", 3)))
+        self.thought_feed_limit = max(2, int(settings.get("thought_feed_limit", 6)))
+        self.satisfaction_plateau_hours = max(
+            0.25, float(settings.get("satisfaction_plateau_hours", 2.0))
+        )
         self.monologue_enabled = bool(settings.get("monologue_enabled", True))
         self.monologue_after_hours = max(
             0.0, float(settings.get("monologue_after_hours", 2.0))
@@ -269,10 +273,23 @@ class XinchaoService:
                 "privacy": "TEXT NOT NULL DEFAULT 'inner_only'",
                 "resolved_at": "TEXT",
                 "updated_at": "TEXT",
+                "feed_count": "INTEGER NOT NULL DEFAULT 0",
+                "last_fed_at": "TEXT",
+                "retired_at": "TEXT",
             }
             for column, declaration in thought_migrations.items():
                 if column not in thought_columns:
                     add_column("xinchao_thoughts", column, declaration)
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS xinchao_plateaus (
+                    pipe_name TEXT PRIMARY KEY,
+                    until_at TEXT NOT NULL,
+                    source TEXT NOT NULL DEFAULT '',
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS xinchao_arrival_rhythm (
@@ -413,7 +430,7 @@ class XinchaoService:
         to_stage: str = "",
         elapsed_seconds: int = 0,
         details: dict | None = None,
-    ) -> None:
+    ) -> dict:
         safe_details = {}
         for key, value in (details or {}).items():
             if isinstance(value, bool):
@@ -543,10 +560,49 @@ class XinchaoService:
         connection: sqlite3.Connection, moment: datetime
     ) -> list[dict]:
         rows = connection.execute(
-            "SELECT * FROM xinchao_thoughts WHERE expires_at > ? ORDER BY last_seen DESC",
+            "SELECT * FROM xinchao_thoughts "
+            "WHERE expires_at > ? AND retired_at IS NULL AND status<>'retired' "
+            "ORDER BY last_seen DESC",
             (moment.isoformat(timespec="seconds"),),
         ).fetchall()
         return [dict(row) for row in rows]
+
+    @staticmethod
+    def _active_plateaus_sync(
+        connection: sqlite3.Connection, moment: datetime
+    ) -> dict[str, str]:
+        stamp = moment.isoformat(timespec="seconds")
+        connection.execute("DELETE FROM xinchao_plateaus WHERE until_at<=?", (stamp,))
+        rows = connection.execute(
+            "SELECT pipe_name, until_at FROM xinchao_plateaus WHERE until_at>?",
+            (stamp,),
+        ).fetchall()
+        return {str(row["pipe_name"]): str(row["until_at"]) for row in rows}
+
+    def _set_plateaus_sync(
+        self,
+        connection: sqlite3.Connection,
+        names: list[str],
+        moment: datetime,
+        source: str,
+    ) -> None:
+        until = (moment + timedelta(hours=self.satisfaction_plateau_hours)).isoformat(
+            timespec="seconds"
+        )
+        stamp = moment.isoformat(timespec="seconds")
+        for name in names:
+            if name not in PIPE_NAMES:
+                continue
+            connection.execute(
+                """
+                INSERT INTO xinchao_plateaus (pipe_name, until_at, source, updated_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(pipe_name) DO UPDATE SET
+                    until_at=excluded.until_at, source=excluded.source,
+                    updated_at=excluded.updated_at
+                """,
+                (name, until, str(source)[:80], stamp),
+            )
 
     @classmethod
     def _floors_from_thoughts(cls, thoughts: list[dict]) -> dict[str, float]:
@@ -598,12 +654,22 @@ class XinchaoService:
         row = connection.execute(
             "SELECT * FROM xinchao_thoughts WHERE canonical_tag=?", (canonical_tag,)
         ).fetchone()
-        active = row and parse_timestamp(row["expires_at"]) > moment
+        active = (
+            row
+            and not row["retired_at"]
+            and str(row["status"]) != "retired"
+            and parse_timestamp(row["expires_at"]) > moment
+        )
         count = int(row["occurrence_count"]) + 1 if active else 1
+        feed_count = int(row["feed_count"] or 0) + 1 if active else 1
         status = "obsession" if count >= self.obsession_repeats else "flash"
+        retired_at = None
+        if feed_count > self.thought_feed_limit:
+            status = "retired"
+            retired_at = moment.isoformat(timespec="seconds")
         lifetime = self.obsession_hours if status == "obsession" else self.flash_hours
         floor = {}
-        if status == "obsession":
+        if status == "obsession" and feed_count <= self.thought_feed_limit:
             for name, raw_value in deltas.items():
                 try:
                     value = float(raw_value)
@@ -620,8 +686,9 @@ class XinchaoService:
                 canonical_tag, event_tag, first_seen, last_seen,
                 occurrence_count, status, floor_json, expires_at,
                 thought_text, tone, intensity, reason, source_event_id,
-                source_tool, source_ref, privacy, resolved_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'inner_only', NULL, ?)
+                source_tool, source_ref, privacy, resolved_at, updated_at,
+                feed_count, last_fed_at, retired_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'inner_only', NULL, ?, ?, ?, ?)
             ON CONFLICT(canonical_tag) DO UPDATE SET
                 event_tag=excluded.event_tag,
                 first_seen=excluded.first_seen,
@@ -639,7 +706,10 @@ class XinchaoService:
                 source_ref=excluded.source_ref,
                 privacy='inner_only',
                 resolved_at=NULL,
-                updated_at=excluded.updated_at
+                updated_at=excluded.updated_at,
+                feed_count=excluded.feed_count,
+                last_fed_at=excluded.last_fed_at,
+                retired_at=excluded.retired_at
             """,
             (
                 canonical_tag,
@@ -658,8 +728,15 @@ class XinchaoService:
                 str(source_tool)[:80],
                 str(source_ref)[:160],
                 moment.isoformat(timespec="seconds"),
+                feed_count,
+                moment.isoformat(timespec="seconds"),
+                retired_at,
             ),
         )
+        saved = connection.execute(
+            "SELECT * FROM xinchao_thoughts WHERE canonical_tag=?", (canonical_tag,)
+        ).fetchone()
+        return dict(saved) if saved else {}
 
     def _apply_sync(self, event_id: int, evaluation: dict) -> dict:
         processed_at = now_iso()
@@ -712,7 +789,13 @@ class XinchaoService:
                 if moment > previous:
                     thoughts = self._active_thoughts_sync(connection, moment)
                     floors = self._combined_floors(thoughts)
-                    pipes = self.engine.evolve(pipes, previous, moment, floors)
+                    pipes = self.engine.evolve(
+                        pipes,
+                        previous,
+                        moment,
+                        floors,
+                        plateaus=self._active_plateaus_sync(connection, moment),
+                    )
                 if bool(state["static_ready"]):
                     # A fresh write after an explicit handoff starts a new
                     # interaction cycle while preserving the evolved state.
@@ -851,6 +934,79 @@ class XinchaoService:
             await asyncio.to_thread(self._mark_error_sync, event_id, str(error))
             return {"status": "pending", "event_id": event_id, "error": str(error)}
 
+    def _supersede_handoff_for_write_sync(self, event_id: int) -> dict:
+        """Make every newly queued narrative write newer than pending absence output."""
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            event = connection.execute(
+                "SELECT created_at, source_tool FROM xinchao_events WHERE event_id=?",
+                (int(event_id),),
+            ).fetchone()
+            state = connection.execute(
+                "SELECT * FROM xinchao_state WHERE state_id=1"
+            ).fetchone()
+            if not event or not state:
+                return {"status": "missing"}
+
+            moment = parse_timestamp(event["created_at"])
+            cycle_id = int(state["cycle_id"])
+            if state["cycle_open"]:
+                pipes = json.loads(state["pipes_json"])
+                if state["last_event_at"]:
+                    previous = parse_timestamp(state["last_event_at"])
+                    if moment > previous:
+                        thoughts = self._active_thoughts_sync(connection, moment)
+                        pipes = self.engine.evolve(
+                            pipes,
+                            previous,
+                            moment,
+                            self._combined_floors(thoughts),
+                            plateaus=self._active_plateaus_sync(connection, moment),
+                        )
+                if bool(state["static_ready"]):
+                    cycle_id += 1
+            else:
+                cycle_id += 1
+                pipes = self._baseline_floors()
+
+            removed = connection.execute(
+                "DELETE FROM xinchao_darkflow WHERE slot_id=1 AND status='pending'"
+            ).rowcount
+            connection.execute(
+                """
+                UPDATE xinchao_state SET cycle_id=?, cycle_open=1,
+                    last_event_at=?, last_presence_at=?, cycle_origin='event',
+                    last_event_summary='', last_event_tag='', pipes_json=?,
+                    sleep_stage='awake', sleep_started_at=NULL, deep_sleep_at=NULL,
+                    darkflow_stage=0, last_darkflow_at=NULL,
+                    darkflow_retry_at=NULL, darkflow_failures=0,
+                    static_ready=0, static_started_at=NULL,
+                    updated_at=?, version=version+1
+                WHERE state_id=1
+                """,
+                (
+                    cycle_id,
+                    moment.isoformat(timespec="seconds"),
+                    moment.isoformat(timespec="seconds"),
+                    json.dumps(pipes, ensure_ascii=False),
+                    now_iso(),
+                ),
+            )
+            self._journal_sync(
+                connection,
+                "new_write_superseded_handoff",
+                cycle_id=cycle_id,
+                source=str(event["source_tool"] or "write"),
+                from_stage=str(state["sleep_stage"] or "awake"),
+                to_stage="awake",
+                details={"discarded_darkflow": bool(removed)},
+            )
+        return {
+            "status": "superseded",
+            "cycle_id": cycle_id,
+            "discarded_darkflow": bool(removed),
+        }
+
     async def record_event(
         self,
         content: str,
@@ -876,12 +1032,14 @@ class XinchaoService:
             pending = await asyncio.to_thread(
                 self._pending_ids_sync, queued["event_id"], 2
             )
-            queued_result = None
             for event_id in pending:
-                processed = await self._process_event(event_id)
-                if int(event_id) == int(queued["event_id"]):
-                    queued_result = processed
-            return queued_result or await self._process_event(queued["event_id"])
+                await self._process_event(event_id)
+            # A successful mailbox/bucket write is the newest truth even when
+            # emotion evaluation later fails or decides the wording is a repeat.
+            await asyncio.to_thread(
+                self._supersede_handoff_for_write_sync, queued["event_id"]
+            )
+            return await self._process_event(queued["event_id"])
 
     async def retry_pending(self, limit: int = 3) -> int:
         if not self.enabled:
@@ -975,6 +1133,7 @@ class XinchaoService:
                     last_event,
                     min(moment, absence_started) if static_ready else moment,
                     floors,
+                    plateaus=self._active_plateaus_sync(connection, moment),
                 )
                 if static_ready and moment > absence_started:
                     pipes = self.engine.evolve_absence(
@@ -982,6 +1141,7 @@ class XinchaoService:
                         absence_started,
                         moment,
                         floors,
+                        plateaus=self._active_plateaus_sync(connection, moment),
                         drowsy_after_hours=self.drowsy_after_hours,
                         sleep_after_hours=self.sleep_after_hours,
                     )
@@ -1416,10 +1576,42 @@ class XinchaoService:
             ).fetchone()
             if not state["cycle_open"] or int(state["cycle_id"]) != int(cycle_id):
                 return {"status": "stale", "deltas": {}}
+            positive_names = sorted(name for name, value in safe_deltas.items() if value > 0)
+            reflux_tag = self._canonical_tag(
+                "输出回流:" + (",".join(positive_names) or "表达")
+            )
+            thought = self._update_thought_sync(
+                connection,
+                reflux_tag,
+                "输出回流",
+                safe_deltas,
+                moment,
+                thought_text=str(content).strip()[:240],
+                tone="mixed",
+                intensity=min(1.0, sum(abs(value) for value in safe_deltas.values()) * 4),
+                reason="已经说出口的内容先成为一条心念；重复出现后才影响驱力。",
+                source_tool="bark_output",
+                source_ref=str(cycle_id),
+            )
+            # First expression only leaves a thought trace. Repetition may
+            # feed back a smaller, bounded signal into the drive state.
+            if int(thought.get("occurrence_count", 1)) < 2 or thought.get("status") == "retired":
+                self._journal_sync(
+                    connection,
+                    "behavior_feedback_deferred",
+                    cycle_id=int(cycle_id),
+                    source="bark",
+                    event_hash=self._opaque_hash(content),
+                    details={"thought": reflux_tag, "occurrences": int(thought.get("occurrence_count", 1))},
+                )
+                return {"status": "deferred", "deltas": {}, "thought": reflux_tag}
+            reflux_deltas = {
+                name: round(value * 0.4, 4) for name, value in safe_deltas.items()
+            }
             thoughts = self._active_thoughts_sync(connection, moment)
             updated = self.engine.apply_event(
                 json.loads(state["pipes_json"]),
-                safe_deltas,
+                reflux_deltas,
                 self._combined_floors(thoughts),
             )
             connection.execute(
@@ -1436,12 +1628,12 @@ class XinchaoService:
                 source="bark",
                 event_hash=self._opaque_hash(content),
                 details={
-                    "changed_pipes": len(safe_deltas),
-                    "positive_total": round(sum(v for v in safe_deltas.values() if v > 0), 4),
-                    "negative_total": round(sum(v for v in safe_deltas.values() if v < 0), 4),
+                    "changed_pipes": len(reflux_deltas),
+                    "positive_total": round(sum(v for v in reflux_deltas.values() if v > 0), 4),
+                    "negative_total": round(sum(v for v in reflux_deltas.values() if v < 0), 4),
                 },
             )
-        return {"status": "applied", "deltas": safe_deltas}
+        return {"status": "applied", "deltas": reflux_deltas, "thought": reflux_tag}
 
     async def apply_behavior_feedback(
         self, cycle_id: int, content: str, deltas: dict
@@ -1565,6 +1757,27 @@ class XinchaoService:
             self._mark_darkflow_delivered_sync, cycle_id
         )
 
+    def _discard_darkflow_sync(self, cycle_id: int, reason: str) -> bool:
+        with self._connect() as connection:
+            cursor = connection.execute(
+                "DELETE FROM xinchao_darkflow WHERE slot_id=1 AND cycle_id=?",
+                (int(cycle_id),),
+            )
+            if cursor.rowcount:
+                self._journal_sync(
+                    connection,
+                    "darkflow_discarded",
+                    cycle_id=int(cycle_id),
+                    source="system",
+                    details={"reason": str(reason)[:80]},
+                )
+        return bool(cursor.rowcount)
+
+    async def discard_darkflow(self, cycle_id: int, reason: str = "newer_write") -> bool:
+        return await asyncio.to_thread(
+            self._discard_darkflow_sync, cycle_id, reason
+        )
+
     def _acknowledge_seen_sync(self, moment: datetime) -> dict:
         """Partly satisfy response-related drives without starting a timer."""
         with self._connect() as connection:
@@ -1587,6 +1800,7 @@ class XinchaoService:
                         parse_timestamp(state["last_event_at"]),
                         moment,
                         floors,
+                        plateaus=self._active_plateaus_sync(connection, moment),
                     )
                 except (TypeError, ValueError):
                     logger.warning(
@@ -1612,6 +1826,12 @@ class XinchaoService:
                 pipes,
                 {"开心": 0.04, "满足": 0.06},
                 floors,
+            )
+            self._set_plateaus_sync(
+                connection,
+                list(retain_excess),
+                moment,
+                source="acknowledged_seen",
             )
             pending_darkflow = connection.execute(
                 "SELECT status FROM xinchao_darkflow "
@@ -1853,6 +2073,22 @@ class XinchaoService:
             return None
         return await asyncio.to_thread(self._boot_delivery_sync, session_id)
 
+    def _latest_boot_delivery_sync(self) -> dict | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT * FROM xinchao_boot_deliveries
+                ORDER BY delivered_at DESC
+                LIMIT 1
+                """
+            ).fetchone()
+        return dict(row) if row else None
+
+    async def latest_boot_delivery(self) -> dict | None:
+        if not self.enabled:
+            return None
+        return await asyncio.to_thread(self._latest_boot_delivery_sync)
+
     def _record_boot_delivery_sync(self, session_id: str, body: str) -> None:
         session_hash = self._opaque_hash(session_id, 24)
         if not session_hash:
@@ -1904,6 +2140,68 @@ class XinchaoService:
             return []
         return await asyncio.to_thread(self._recent_transitions_sync, limit)
 
+    def _personality_preview_sync(self, days: int) -> dict:
+        """Observe slow recurring patterns without rewriting identity or memory."""
+        safe_days = max(7, min(365, int(days)))
+        cutoff = (beijing_now() - timedelta(days=safe_days)).isoformat(
+            timespec="seconds"
+        )
+        with self._connect() as connection:
+            events = connection.execute(
+                """
+                SELECT event_tag, COUNT(*) AS occurrences,
+                       AVG(severity) AS average_severity,
+                       MAX(created_at) AS last_seen
+                FROM xinchao_events
+                WHERE status='applied' AND created_at>=? AND event_tag<>''
+                GROUP BY event_tag
+                HAVING COUNT(*)>=2
+                ORDER BY occurrences DESC, average_severity DESC
+                LIMIT 12
+                """,
+                (cutoff,),
+            ).fetchall()
+            thoughts = connection.execute(
+                """
+                SELECT event_tag, occurrence_count, status, last_seen
+                FROM xinchao_thoughts
+                WHERE first_seen>=? AND occurrence_count>=2
+                ORDER BY occurrence_count DESC, last_seen DESC
+                LIMIT 12
+                """,
+                (cutoff,),
+            ).fetchall()
+        patterns = []
+        for row in events[:6]:
+            patterns.append(
+                {
+                    "pattern": str(row["event_tag"]),
+                    "evidence_count": int(row["occurrences"]),
+                    "average_severity": round(float(row["average_severity"] or 0), 3),
+                    "last_seen": str(row["last_seen"] or ""),
+                }
+            )
+        return {
+            "mode": "observation_only",
+            "days": safe_days,
+            "patterns": patterns,
+            # Keep the old key for clients that already read it.
+            "suggestions": patterns,
+            "recurring_thoughts": [dict(row) for row in thoughts],
+            "rewrites_identity": False,
+            "rewrites_memory": False,
+        }
+
+    async def personality_preview(self, days: int = 30) -> dict:
+        if not self.enabled:
+            return {
+                "mode": "observation_only",
+                "disabled": True,
+                "patterns": [],
+                "suggestions": [],
+            }
+        return await asyncio.to_thread(self._personality_preview_sync, days)
+
     async def status(self) -> dict:
         if not self.enabled:
             return {"available": False, "disabled": True}
@@ -1936,7 +2234,9 @@ class XinchaoService:
             clauses.extend(["resolved_at IS NULL", "expires_at<=?"])
             params.append(moment.isoformat(timespec="seconds"))
         else:
-            clauses.extend(["resolved_at IS NULL", "expires_at>?"])
+            clauses.extend(
+                ["resolved_at IS NULL", "retired_at IS NULL", "status<>'retired'", "expires_at>?"]
+            )
             params.append(moment.isoformat(timespec="seconds"))
         params.append(max(1, min(500, int(limit))))
         with self._connect() as connection:

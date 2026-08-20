@@ -1,15 +1,69 @@
-# Clio Memory MCP usage
+# Clio Memory 客户端使用指南
 
-This file is a generic integration prompt. It contains no persona or private memory.
+你连接的是一个跨窗口记忆、检索、状态与连续性 MCP 服务。它保存的是被明确写入的内容，不等于完整聊天记录。
 
-1. At the beginning of a new conversation, call `pulse_boot` once.
-2. Treat its result as private context. Do not repeat the full result to the user unless asked.
-3. Use `breath` to search by meaning and `recall` to read the exact source only when needed.
-4. Use `hold` for one memory and `grow` for an archive. To write only a handoff letter, call `mailbox` directly.
-5. Use `trace` for metadata or content changes. Prefer append mode when adding information.
-6. Use `calendar` for a selected date and `timeline` for facts whose values change over time.
-7. Use `tasks` for unfinished matters, `treasury` for the AI ledger, and `feedback` to rate retrievals.
-8. Never invent a successful write. Report tool errors exactly.
-9. Verify the response `seal` against the private value configured by the user.
-10. Sealed memories are excluded unless the user explicitly authorizes access.
+## 开局
 
+- 新窗口先调用一次 `pulse_boot()`；同一窗口需要重新交接时可以再次调用。
+- 先看开机摘要和核心目录，不要一次读取全库。
+- 需要原文时再按桶号调用 `recall`，需要寻找时先调用 `breath`。
+
+## 23 个工具
+
+### 记忆与查找
+
+- `pulse_boot`：新窗口的精简交接与完整工具入口。
+- `pulse`：查看全库状态、桶列表和分页结果。
+- `breath`：用语义、关键词、主题、时间和可选心境混合检索。
+- `recall`：按 `bucket_id` 分页读取一只桶的原文；检索后尽量同时带回 `retrieval_id`。
+- `calendar`：按北京时间查询任意 `YYYY-MM-DD` 的真实写入和事件。
+- `timeline`：用自然措辞查询事实如何随时间变化；写入正式事实需要确认。
+- `cabinet`：按主目录和子目录浏览主题柜。
+
+### 写入与维护
+
+- `hold`：保存一件明确值得记住的事或感受；服务器自动使用 UTC+8 日期。
+- `grow`：归档一段事件，并可写一封给下个窗口的信。
+- `mailbox`：查询、搜索、修改或删除窗口信箱。
+- `trace`：修改桶内容或元数据；写前自动保存快照。
+- `split_bucket`：按时间标记安全拆分过长的桶，不改写原文。
+
+### 状态与连续性
+
+- `xinchao_status`：查看当前激素/驱力状态，不会因读取而清空。
+- `inner_state`：查看心念、共振与张力。
+- `living_memory`：查看单桶 LMC-5 五维坐标：时间、关系、事实、情绪、代谢。
+- `self_state`：按需查看此刻状态、活跃心念与一段时间形成的人格走向。
+- `personality_preview`：只读查看长期人格轨迹。
+- `continuity_review`：查看不含原文和密钥的连续性事件账本，并可校验事件链。
+- `heartbeat`：明确报告当前窗口仍在对话；不写叙事记忆。
+
+### 事务与反馈
+
+- `tasks`：新增、查看、完成、取消或删除未竟事项。
+- `treasury`：管理 AI 小金库的收入、支出和余额。
+- `feedback`：把一次检索评价为 `useful` 或 `irrelevant`。
+- `digest_preview`：只生成自动整理演习报告，不自动归档、合并或删除。
+
+## 写入原则
+
+- 只写值得跨窗口保留的事件、事实、感受、约定和明确事项；闲聊水话不必存。
+- 写入时保留时间、人物、事件、当下感受和未解决之处，不要只写冷冰冰的流水账。
+- 用户明确指定只写信箱时，只操作 `mailbox` 或 `grow` 的信箱路径，不另建事实桶。
+- 不重复保存同一内容；不确定是否已存在时先 `breath`。
+- 不擅自改写旧原文。发现矛盾时保留双方内容并提示用户裁决。
+
+## 读取原则
+
+- 只读取当前问题需要的内容。先检索，再读少量命中桶。
+- `calendar` 用于“某一天发生和写入了什么”；普通浏览、读取和修改不算生活事件。
+- `timeline` 用于“同一事实过去是什么、何时变化、现在是什么”。
+- `living_memory`、`self_state` 和 `personality_preview` 是按需自查，不必每个新窗口都调用。
+- 封存内容默认不可见，只有用户明确授权时才包含。
+
+## 安全边界
+
+- 读取不会清空记忆。
+- 摘要、向量、状态和五维坐标都是旁路数据，不能覆盖 Markdown 原文。
+- 删除、批量整理、迁移和解除封存属于高风险操作，必须先说明影响并取得用户确认。
+- `digest_preview` 永远只是演习，不能据此自动执行删除或合并。

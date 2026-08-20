@@ -1,68 +1,105 @@
+# ============================================================
+# Ombre Brain Docker Compose
+# Docker Compose 配置
+#
+# Usage / 使用：
+#   1. Create .env: echo "OMBRE_API_KEY=your-key" > .env
+#      创建 .env 文件
+#   2. docker-compose up -d
+#   3. docker compose logs tunnel (for public URL / 查看公网地址)
+# ============================================================
+
 services:
-  clio-memory:
+  ombre-brain:
     build: .
-    image: clio-memory:latest
-    container_name: clio-memory
+    container_name: ombre-brain
     restart: always
     ports:
-      - "127.0.0.1:18001:8000"
+      - "18001:8000"                        # Local debug port (optional) / 本地调试端口
     environment:
-      OMBRE_API_KEY: ${OMBRE_API_KEY:-}
-      OMBRE_RESPONSE_SEAL: ${OMBRE_RESPONSE_SEAL}
-      OMBRE_DIAGNOSTIC_LOG: /data/logs/mcp_requests.log
-      OMBRE_TRANSPORT: streamable-http
-      OMBRE_BUCKETS_DIR: /data
-      OMBRE_EMBEDDING_DB: /data/embeddings.sqlite3
-      OMBRE_SUMMARY_CACHE_DB: /data/summaries.sqlite3
-      OMBRE_HISTORY_DB: /data/history.sqlite3
-      OMBRE_FACT_TIMELINE_DB: /data/fact_timeline.sqlite3
-      OMBRE_RELATIONS_DB: /data/relations.sqlite3
-      OMBRE_RETRIEVAL_FEEDBACK_DB: /data/retrieval_feedback.sqlite3
-      OMBRE_TREASURY_DB: /data/treasury.sqlite3
-      OMBRE_TASKS_DB: /data/tasks.sqlite3
-      OMBRE_XINCHAO_DB: /data/xinchao.sqlite3
-      OMBRE_BEHAVIOR_DB: /data/behavior.sqlite3
-      OMBRE_TOPICS_DB: /data/topics.sqlite3
-      OMBRE_BARK_BASE_URL: ${OMBRE_BARK_BASE_URL:-https://api.day.app}
-      OMBRE_BARK_DEVICE_KEY: ${OMBRE_BARK_DEVICE_KEY:-}
-      OMBRE_EMBEDDING_CACHE_DIR: /models
+      - OMBRE_API_KEY=${OMBRE_API_KEY}      # From .env file / 从 .env 文件读取
+      - OMBRE_RESPONSE_SEAL=${OMBRE_RESPONSE_SEAL} # Response verification seal from host environment
+      - OMBRE_DIAGNOSTIC_LOG=/data/logs/mcp_requests.log
+      - OMBRE_TRANSPORT=streamable-http     # Claude.ai requires streamable-http
+      - OMBRE_BUCKETS_DIR=/data             # Container-internal bucket path / 容器内路径
+      - OMBRE_EMBEDDING_DB=/data/embeddings.sqlite3
+      - OMBRE_SUMMARY_CACHE_DB=/data/summaries.sqlite3
+      - OMBRE_TREASURY_DB=/data/treasury.sqlite3
+      - OMBRE_XINCHAO_DB=/data/xinchao.sqlite3
+      - OMBRE_BEHAVIOR_DB=/data/behavior.sqlite3
+      - OMBRE_TOPICS_DB=/data/topics.sqlite3
+      - OMBRE_BARK_BASE_URL=${OMBRE_BARK_BASE_URL:-https://api.day.app}
+      - OMBRE_BARK_DEVICE_KEY=${OMBRE_BARK_DEVICE_KEY:-}
+      - OMBRE_EMBEDDING_CACHE_DIR=/models
     volumes:
-      - ${CLIO_DATA_DIR:-./data}:/data
-      - ${CLIO_MODEL_DIR:-./models}:/models
-      - ./config.yaml:/app/config.yaml:ro
+      # Mount your Obsidian vault (or any host directory) for persistent storage
+      # 挂载你的 Obsidian 仓库（或任意宿主机目录）做持久化存储
+      # Example / 示例:
+      #   - /path/to/your/Obsidian Vault/Ombre Brain:/data
+      - type: bind
+        source: E:/Ombre-Brain/memory
+        target: /data
+      - type: bind
+        source: E:/Ombre-Brain/models
+        target: /models
+      - ./config.yaml:/app/config.yaml
 
-  clio-manager:
+  ombre-manager:
     build:
       context: .
       dockerfile: Dockerfile.manager
-    image: clio-memory-manager:latest
-    container_name: clio-memory-manager
+    image: ombre-brain-manager:latest
+    container_name: ombre-manager
     restart: always
+    command: ["uvicorn", "manager_server:app", "--host", "0.0.0.0", "--port", "8787"]
+    environment:
+      - OMBRE_API_KEY=${OMBRE_API_KEY}
+      - OMBRE_BUCKETS_DIR=/data
+      - OMBRE_EMBEDDING_DB=/data/embeddings.sqlite3
+      - OMBRE_SUMMARY_CACHE_DB=/data/summaries.sqlite3
+      - OMBRE_HISTORY_DB=/data/history.sqlite3
+      - OMBRE_FACT_TIMELINE_DB=/data/fact_timeline.sqlite3
+      - OMBRE_RELATIONS_DB=/data/relations.sqlite3
+      - OMBRE_RETRIEVAL_FEEDBACK_DB=/data/retrieval_feedback.sqlite3
+      - OMBRE_TREASURY_DB=/data/treasury.sqlite3
+      - OMBRE_XINCHAO_DB=/data/xinchao.sqlite3
+      - OMBRE_BEHAVIOR_DB=/data/behavior.sqlite3
+      - OMBRE_TOPICS_DB=/data/topics.sqlite3
+      - OMBRE_BARK_BASE_URL=${OMBRE_BARK_BASE_URL:-https://api.day.app}
+      - OMBRE_BARK_DEVICE_KEY=${OMBRE_BARK_DEVICE_KEY:-}
+      - OMBRE_EMBEDDING_CACHE_DIR=/models
+      - CLIO_EXPORT_DIR=/exports
+    volumes:
+      - type: bind
+        source: E:/Ombre-Brain/memory
+        target: /data
+      - type: bind
+        source: E:/Ombre-Brain/models
+        target: /models
+      - type: bind
+        source: E:/Ombre-Brain/exports
+        target: /exports
+      - ./config.yaml:/app/config.yaml:ro
     ports:
       - "127.0.0.1:8787:8787"
-    environment:
-      OMBRE_API_KEY: ${OMBRE_API_KEY:-}
-      CLIO_MANAGER_PASSWORD: ${CLIO_MANAGER_PASSWORD}
-      OMBRE_BUCKETS_DIR: /data
-      OMBRE_EMBEDDING_DB: /data/embeddings.sqlite3
-      OMBRE_SUMMARY_CACHE_DB: /data/summaries.sqlite3
-      OMBRE_HISTORY_DB: /data/history.sqlite3
-      OMBRE_FACT_TIMELINE_DB: /data/fact_timeline.sqlite3
-      OMBRE_RELATIONS_DB: /data/relations.sqlite3
-      OMBRE_RETRIEVAL_FEEDBACK_DB: /data/retrieval_feedback.sqlite3
-      OMBRE_TREASURY_DB: /data/treasury.sqlite3
-      OMBRE_TASKS_DB: /data/tasks.sqlite3
-      OMBRE_XINCHAO_DB: /data/xinchao.sqlite3
-      OMBRE_BEHAVIOR_DB: /data/behavior.sqlite3
-      OMBRE_TOPICS_DB: /data/topics.sqlite3
-      OMBRE_BARK_BASE_URL: ${OMBRE_BARK_BASE_URL:-https://api.day.app}
-      OMBRE_BARK_DEVICE_KEY: ${OMBRE_BARK_DEVICE_KEY:-}
-      OMBRE_EMBEDDING_CACHE_DIR: /models
-      CLIO_EXPORT_DIR: /exports
-    volumes:
-      - ${CLIO_DATA_DIR:-./data}:/data
-      - ${CLIO_MODEL_DIR:-./models}:/models
-      - ${CLIO_EXPORT_DIR:-./exports}:/exports
-      - ./config.yaml:/app/config.yaml:ro
     depends_on:
-      - clio-memory
+      - ombre-brain
+
+  # Cloudflare Tunnel (optional) — expose to public internet
+  # Cloudflare Tunnel（可选）— 暴露到公网
+  # Configure your own credentials under ~/.cloudflared/
+  # 在 ~/.cloudflared/ 下放你自己的凭证
+  tunnel:
+    image: cloudflare/cloudflared:latest
+    container_name: ombre-tunnel
+    restart: always
+    command: >
+      tunnel --no-autoupdate --protocol http2
+      --config /etc/cloudflared/config-docker.yml
+      --proxy-keepalive-timeout 300s
+      --proxy-connection-timeout 300s
+      run
+    volumes:
+      - ~/.cloudflared:/etc/cloudflared
+    depends_on:
+      - ombre-brain
