@@ -1,9 +1,9 @@
 # ============================================================
-# Clio Memory Docker Build
+# Ombre Brain Docker Build
 # Docker 构建文件
 #
-# Build: docker build -t clio-memory .
-# Run:   docker run -e OMBRE_API_KEY=your-key -p 8000:8000 clio-memory
+# Build: docker build -t ombre-brain .
+# Run:   docker run -e OMBRE_API_KEY=your-key -p 8000:8000 ombre-brain
 # ============================================================
 
 FROM mcr.microsoft.com/devcontainers/python:1-3.12-bookworm

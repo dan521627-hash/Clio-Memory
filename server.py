@@ -74,12 +74,14 @@ from bucket_manager import BucketManager
 from behavior_service import BehaviorService
 from calendar_view import build_calendar_day, format_calendar_day
 from conflict_detector import ConflictDetector
+from continuity_ledger import ContinuityLedger
 from dehydrator import Dehydrator
 from decay_engine import DecayEngine
 from digestion_planner import DigestionPlanner
 from fact_timeline_service import FactTimelineService
 from fact_timeline_store import FactTimelineStore
 from history_retention import HistoryRetentionEngine
+from living_memory import LivingMemoryStore
 from mailbox_store import MailboxStore
 from mailbox_search import search_mailbox
 from memory_segments import split_memory_segments
@@ -817,6 +819,8 @@ fact_timeline_service = FactTimelineService(
     config, xinchao_service.evaluator, fact_timeline_store, bucket_mgr
 )
 topic_store = TopicStore(config)
+continuity_ledger = ContinuityLedger(config)
+living_memory_store = LivingMemoryStore(config)
 retrieval_feedback_store = bucket_mgr.retrieval_feedback
 history_retention_engine = HistoryRetentionEngine(
     config, bucket_mgr, bucket_mgr.history_store
@@ -1077,10 +1081,43 @@ async def _record_write_sidecars(
             error,
         )
         fact_result = {"status": "error", "error": str(error)}
+    try:
+        await continuity_ledger.append(
+            "narrative_write",
+            source_tool,
+            source_ref,
+            {
+                "characters": len(str(content)),
+                "content_sha256": hashlib.sha256(
+                    str(content).encode("utf-8")
+                ).hexdigest(),
+                "xinchao_status": xinchao_result.get("status"),
+                "task_status": task_result.get("status"),
+                "fact_status": fact_result.get("status"),
+            },
+        )
+    except Exception as error:
+        logger.warning("Continuity ledger append failed: %s", error)
+    lmc5_result = {"status": "not_applicable"}
+    if source_tool in {"hold", "grow"} and str(source_ref or "").strip():
+        try:
+            coordinates = await _living_memory_coordinates(str(source_ref).strip())
+            lmc5_result = {
+                "status": "refreshed",
+                "coordinate": coordinates.get("coordinate", {}),
+            }
+        except Exception as error:
+            logger.warning(
+                "LMC-5 refresh failed after successful %s write: %s",
+                source_tool,
+                error,
+            )
+            lmc5_result = {"status": "pending", "error": str(error)}
     return {
         "tasks": task_result,
         "xinchao": xinchao_result,
         "fact_candidates": fact_result,
+        "living_memory": lmc5_result,
     }
 
 
@@ -2477,20 +2514,30 @@ async def trace(
 # Tool 6: pulse_boot — Compact startup context
 # 工具 6：pulse_boot — 开机专用上下文
 # =============================================================
+PULSE_BOOT_TOOL_GUIDE = """【按需入口】
+记忆：breath 搜索/浮现；recall 读原文；calendar 按北京时间查某天；timeline 查事实变化；cabinet 看主题目录。
+写入：hold 记一件事；grow 归档并可留信；mailbox 查/改/删信；trace 修改桶；split_bucket 拆长桶。
+状态：xinchao_status 看激素；inner_state 看心念；living_memory 看五维坐标；self_state 看当前自我与人格走向；personality_preview 看人格轨迹；continuity_review 查连续性。
+事务：tasks 管未竟；treasury 管小金库；feedback 评价检索；digest_preview 只生成整理演习；pulse 看全库状态；heartbeat 报告当前仍在场。
+只在当前问题需要时调用，不要一次读取全库；pulse_boot 可在新窗口重复调用。"""
+
+
 @mcp.tool()
 async def pulse_boot() -> str:
-    """pulse_boot startup summary 开机摘要:钉选、近期归档、待办及预留区"""
+    """pulse_boot startup summary 开机摘要:核心目录、当前状态、最新交接与未竟数量"""
     await history_retention_engine.ensure_started()
     settings = config.get("pulse_boot", {})
     session_id = _active_mcp_session_key()
-    max_chars = max(2000, min(12000, int(settings.get("max_chars", 6000))))
-    core_lead_chars = max(40, min(160, int(settings.get("core_lead_chars", 80))))
+    max_chars = max(1200, min(8000, int(settings.get("max_chars", 3600))))
     core_max_items = max(1, min(30, int(settings.get("core_max_items", 20))))
     first_bucket_id = str(settings.get("first_bucket_id", "")).strip()
-    feeling_write_reminder_enabled = bool(
-        settings.get("feeling_write_reminder", True)
-    )
-    thought_limit = max(1, min(8, int(settings.get("thought_limit", 3))))
+    thought_limit = max(1, min(20, int(settings.get("thought_limit", 8))))
+    try:
+        previous_boot = await xinchao_service.latest_boot_delivery()
+    except Exception as error:
+        logger.warning("pulse_boot delivery cursor read failed: %s", error)
+        previous_boot = None
+    previous_boot_at = str((previous_boot or {}).get("delivered_at") or "")
     mailbox_context = await _pulse_boot_mailbox_context()
     darkflow = None
     xinchao_state = {}
@@ -2513,59 +2560,58 @@ async def pulse_boot() -> str:
         active_thoughts = await xinchao_service.list_private_thoughts(
             status="active", limit=thought_limit
         )
-        thought_lines = []
-        for item in active_thoughts:
-            text = str(item.get("thought_text") or "").strip()
-            if not text:
-                continue
-            kind = "执念" if item.get("status") == "obsession" else "闪念"
-            thought_lines.append(f"- [{kind}] {text}")
-        thought_text = "\n".join(thought_lines)
+        obsession_count = sum(
+            1 for item in active_thoughts if item.get("status") == "obsession"
+        )
+        flash_count = max(0, len(active_thoughts) - obsession_count)
+        thought_text = (
+            f"有 {len(active_thoughts)} 条心念（闪念 {flash_count}，执念 {obsession_count}）；"
+            "需要理解内在状态时再调用 inner_state。"
+            if active_thoughts
+            else ""
+        )
     except Exception as error:
         logger.warning("pulse_boot private thought read failed: %s", error)
         thought_text = ""
-    try:
-        treasury_summary = await treasury_store.summary()
-        treasury_text = ""
-        if int(treasury_summary.get("entry_count", 0)) > 0:
-            treasury_text = (
-                f"余额 {treasury_summary['symbol']}{treasury_summary['balance']}｜"
-                f"累计收入 {treasury_summary['symbol']}{treasury_summary['total_income']}｜"
-                f"累计支出 {treasury_summary['symbol']}{treasury_summary['total_expense']}"
-            )
-    except Exception as error:
-        logger.warning("pulse_boot treasury read failed: %s", error)
-        treasury_text = ""
 
     task_completion_ids = []
     try:
-        task_snapshot = await task_service.boot_snapshot(
-            open_limit=max(1, min(20, int(settings.get("task_open_limit", 10)))),
-            completed_limit=max(1, min(10, int(settings.get("task_completed_limit", 5)))),
-        )
-        open_tasks = task_snapshot["open"]
-        completed_tasks = task_snapshot["completed"]
+        task_counts = await task_service.store.counts()
+        completed_tasks = await task_service.store.pending_completions(limit=20)
         task_completion_ids = [int(item["task_id"]) for item in completed_tasks]
-        task_lines = [
-            f"- #{item['task_id']} [{_task_importance_label(item['importance'])}] {item['title']}"
-            + (f"｜{' '.join(item['details'].split())[:160]}" if item.get("details") else "")
-            for item in open_tasks
-        ]
-        completed_lines = [
-            f"- #{item['task_id']} {item['title']}｜完成时间 {item.get('completed_at') or item['updated_at']}"
-            for item in completed_tasks
-        ]
-        task_text = ""
-        if task_lines:
-            task_text += "还没有完成或仍要处理：\n" + "\n".join(task_lines)
-        if completed_lines:
-            if task_text:
-                task_text += "\n"
-            task_text += "刚刚完成（仅本次告知）：\n" + "\n".join(completed_lines)
+        open_count = int(task_counts.get("open", 0))
+        task_text = (
+            f"有 {open_count} 件未完成；需要时调用 tasks 查看详情。"
+            if open_count > 0
+            else ""
+        )
     except Exception as error:
         logger.warning("pulse_boot task read failed: %s", error)
         task_text = ""
         task_completion_ids = []
+
+    try:
+        timeline_pending_count, timeline_groups = await asyncio.gather(
+            fact_timeline_store.list_candidates(status="pending", limit=500),
+            fact_timeline_store.list_facts(limit=200),
+        )
+        timeline_pending_count = len(timeline_pending_count)
+        timeline_version_count = sum(
+            len(item.get("versions") or []) for item in timeline_groups
+        )
+        timeline_latest = max(
+            (
+                str(version.get("effective_date") or "")
+                for item in timeline_groups
+                for version in (item.get("versions") or [])
+            ),
+            default="",
+        )
+    except Exception as error:
+        logger.warning("pulse_boot timeline count failed: %s", error)
+        timeline_pending_count = 0
+        timeline_version_count = 0
+        timeline_latest = ""
 
     mailbox_text = await _pulse_boot_mailbox_section(mailbox_context)
     behavior_handoff_ids = []
@@ -2593,7 +2639,7 @@ async def pulse_boot() -> str:
         behavior_handoff_ids = [int(item["action_id"]) for item in cycle_behaviors]
         behavior_text = "\n".join(
             f"- {item.get('delivered_at') or item['decided_at']}｜"
-            f"已通过 Bark 发送：{item['content']}"
+            f"已发送：{' '.join(str(item['content']).split())[:180]}"
             + (
                 f"｜用户已于 {item['acknowledged_at']} 点过“我看到了”"
                 if item.get("acknowledged_at")
@@ -2604,11 +2650,6 @@ async def pulse_boot() -> str:
     except Exception as error:
         logger.warning("pulse_boot behavior log read failed: %s", error)
         behavior_text = ""
-
-    topic_directory_text = "\n".join(
-        f"- {main_topic}：{'、'.join(subtopics)}"
-        for main_topic, subtopics in TOPIC_TREE.items()
-    )
 
     try:
         buckets = await bucket_mgr.list_all(include_archive=True)
@@ -2633,92 +2674,121 @@ async def pulse_boot() -> str:
     fixed_parts = []
     for index, bucket in enumerate(fixed, start=1):
         metadata = bucket.get("metadata", {})
-        lead = _pulse_boot_core_lead(bucket, core_lead_chars)
         fixed_parts.append(
             f"{index}. {metadata.get('name') or bucket['id']}｜bucket_id: {bucket['id']}"
-            + (f"\n   开头: {lead}" if lead else "")
         )
     fixed_text = "\n".join(fixed_parts)
 
-    feeling_write_reminder = ""
-    if feeling_write_reminder_enabled:
-        feeling_write_reminder = (
-            "【感受写入提醒】\n"
-            "写叙事记忆或信箱时，用第一人称写清事件、当时想法、情绪或身体反应；"
-            "平静就写平静，不编造。值得长期保存的感受先交用户确认，再调用 "
-            'hold(content="我当时……", feeling=true)。'
+    event_contexts = list(xinchao_state.get("event_contexts") or [])
+    write_contexts = [
+        item
+        for item in event_contexts
+        if str(item.get("source_tool") or "") in {"hold", "grow"}
+    ]
+    latest_write = max(
+        write_contexts,
+        key=lambda item: str(item.get("created_at") or ""),
+        default=None,
+    )
+    new_write = None
+    if (
+        latest_write
+        and previous_boot_at
+        and str(latest_write.get("created_at") or "") > previous_boot_at
+    ):
+        new_write = latest_write
+    bucket_names = {
+        str(bucket.get("id")): str(
+            bucket.get("metadata", {}).get("name") or bucket.get("id")
         )
+        for bucket in buckets
+    }
+    latest_write_text = ""
+    if new_write:
+        bucket_id = str(new_write.get("source_ref") or "").strip()
+        preview = " ".join(
+            str(
+                new_write.get("context_card")
+                or new_write.get("event_summary")
+                or ""
+            ).split()
+        )[:220]
+        latest_write_text = (
+            f"{bucket_names.get(bucket_id, bucket_id or '新记忆')}｜bucket_id: {bucket_id}"
+            + (f"\n{preview}" if preview else "")
+        )
+
+    newest_source_time = max(
+        str((mailbox_context or {}).get("created_at") or ""),
+        str((latest_write or {}).get("created_at") or ""),
+    )
+    if (
+        darkflow
+        and newest_source_time
+        and newest_source_time > str(darkflow.get("created_at") or "")
+    ):
+        try:
+            await xinchao_service.discard_darkflow(
+                int(darkflow["cycle_id"]), reason="newer_mailbox_or_bucket_write"
+            )
+        except Exception as error:
+            logger.warning("pulse_boot stale darkflow discard failed: %s", error)
+        darkflow = None
+
     handoff_parts = []
     has_darkflow = bool(darkflow and str(darkflow.get("content", "")).strip())
     if has_darkflow:
-        boot_elapsed_seconds = int(
-            xinchao_state.get("elapsed_seconds", darkflow.get("elapsed_seconds", 0))
-        )
         handoff_parts.append(
-            "【有一条新的暗涌】\n"
-            "静默期间形成了一条新的内在沉淀，正文不在开机摘要中展开；"
-            "需要时再调用 xinchao_status 或 inner_state 深读。\n"
-            "从上一轮明确结束到本次开机已过去："
-            f"{xinchao_service.format_elapsed_zh(boot_elapsed_seconds)}"
+            f"【暗涌】\n{str(darkflow.get('content') or '').strip()}"
         )
-    elif bool(xinchao_state.get("static_ready", False)):
-        boot_elapsed_seconds = int(xinchao_state.get("elapsed_seconds", 0))
-        handoff_parts.append(
-            "【静默时长】\n"
-            "从上一轮明确结束到本次开机已过去："
-            f"{xinchao_service.format_elapsed_zh(boot_elapsed_seconds)}"
-        )
-    if mailbox_text:
+        if mailbox_text:
+            handoff_parts.append("信箱另有最新留言，需要时调用 mailbox 自主读取。")
+    elif mailbox_text:
         handoff_parts.append(f"【信箱最新留言】\n{mailbox_text}")
     handoff_text = "\n\n".join(handoff_parts)
 
     sections = [
         "=== Clio 开机记忆 ===",
-        (
-            "【可用能力】\n"
-            "找记忆 breath｜读原文 recall｜写记忆 hold/grow｜修改 trace｜"
-            "目录 cabinet｜信箱 mailbox｜未竟 tasks｜状态 xinchao_status/heartbeat｜内在 inner_state｜"
-            "时间线 timeline｜检索反馈 feedback｜拆桶 split_bucket｜小金库 treasury。\n"
-            "按当前对话需要调用，不要为了检查而把全库读一遍。"
-        ),
+        PULSE_BOOT_TOOL_GUIDE,
     ]
     if fixed_text:
         sections.append(
             "【固定层：核心记忆目录】\n"
             f"{fixed_text}"
         )
-    if topic_directory_text:
-        sections.append(
-            "【全库主题导航】\n"
-            "只显示方向，不读取正文；按需调用 cabinet 进入主题。\n"
-            f"{topic_directory_text}"
-        )
     xinchao_text = _pulse_boot_hormone_summary(xinchao_text)
     if xinchao_text:
-        sections.append(
-            "【激素：离开期间的状态】\n"
-            f"{xinchao_text}"
-        )
+        sections.append(f"【激素】\n{xinchao_text}")
     if thought_text:
         sections.append(f"【心念】\n{thought_text}")
     if handoff_text:
         sections.append(handoff_text)
+    if latest_write_text:
+        sections.append(f"【新写入的记忆】\n{latest_write_text}")
     if behavior_text:
         sections.append(
-            "【本轮静默期间实际行为】\n"
+            "【静默期间已发送】\n"
             f"{behavior_text}"
         )
     if task_text:
         sections.append(f"【未竟】\n{task_text}")
-    if treasury_text:
-        sections.append(f"【AI小金库】\n{treasury_text}")
-    if feeling_write_reminder:
-        sections.append(feeling_write_reminder)
+    if timeline_pending_count or timeline_version_count:
+        timeline_bits = []
+        if timeline_version_count:
+            timeline_bits.append(f"已记录 {timeline_version_count} 个事实节点")
+        if timeline_latest:
+            timeline_bits.append(f"最近变化 {timeline_latest}")
+        if timeline_pending_count:
+            timeline_bits.append(f"待确认 {timeline_pending_count} 条")
+        sections.append(
+            "【事实时间线】" + "；".join(timeline_bits)
+            + "。需要时调用 timeline 查看变化。"
+        )
     body = "\n\n".join(sections)
     if len(body) > max_chars:
         suffix = "\n\n【开机资料已达到固定上限，其余记忆请按需使用 recall 深读。】"
         body = body[: max(1, max_chars - len(suffix))].rstrip() + suffix
-    if darkflow and "【有一条新的暗涌】" in body:
+    if darkflow and "【暗涌】" in body:
         try:
             await xinchao_service.mark_darkflow_delivered(
                 int(darkflow["cycle_id"])
@@ -2730,7 +2800,7 @@ async def pulse_boot() -> str:
             await behavior_service.store.purge_handoff(behavior_handoff_ids)
         except Exception as error:
             logger.warning("pulse_boot behavior handoff purge failed: %s", error)
-    if task_completion_ids and "刚刚完成（仅本次告知）" in body:
+    if task_completion_ids and "新完成" in body:
         try:
             await task_service.store.mark_completions_delivered(task_completion_ids)
         except Exception as error:
@@ -2744,6 +2814,10 @@ async def pulse_boot() -> str:
         )
     except Exception as error:
         logger.warning("pulse_boot presence timer could not start: %s", error)
+    try:
+        await xinchao_service.record_boot_delivery(session_id, body)
+    except Exception as error:
+        logger.warning("pulse_boot delivery cursor write failed: %s", error)
     return _with_response_seal(body)
 
 
@@ -3025,29 +3099,38 @@ async def calendar(
 # =============================================================
 @mcp.tool()
 async def timeline(
-    fact: str,
+    fact: str = "",
     value: str = "",
     effective_date: str = "",
     source_bucket_id: str = "",
     confirm: bool = False,
 ) -> str:
     """timeline facts date 查询事实时间线;提供 value/date/source 后须 confirm=True 记录"""
-    try:
-        fact_key, fact_label = fact_timeline_store.normalize_fact_key(fact)
-    except ValueError as error:
-        return _with_response_seal(str(error))
-
-    # Read mode never writes. An exact fact name keeps unrelated timelines apart.
+    fact_label = str(fact or "").strip()
+    # Read mode accepts natural or partial wording and returns the nearest
+    # visible fact lines. Write mode still requires one exact fact label.
     if not value and not effective_date and not source_bucket_id:
         try:
-            rows = await fact_timeline_store.versions(fact_label)
-            visible = await _visible_fact_timeline_rows(rows)
+            groups = await fact_timeline_store.list_facts(search=fact_label, limit=8)
         except Exception as error:
             logger.error("Fact timeline read failed: %s", error)
             return _with_response_seal("事实时间线暂时无法访问。")
-        if not visible:
+        rendered = []
+        for group in groups:
+            visible = await _visible_fact_timeline_rows(group.get("versions") or [])
+            if visible:
+                rendered.append(
+                    f"【{group.get('fact_label') or '未命名事实'}】\n"
+                    + _render_fact_timeline(visible).lstrip()
+                )
+        if not rendered:
             return _with_response_seal("未找到可见的事实时间线。")
-        return _with_response_seal(_render_fact_timeline(visible).lstrip())
+        return _with_response_seal("\n\n".join(rendered))
+
+    try:
+        fact_key, fact_label = fact_timeline_store.normalize_fact_key(fact_label)
+    except ValueError as error:
+        return _with_response_seal(str(error))
 
     try:
         fact_value = fact_timeline_store.normalize_value(value)
@@ -3100,6 +3183,150 @@ async def timeline(
     status = "记录没有变化" if saved["status"] == "unchanged" else "已记录"
     body = f"{status}：{fact_label}\n{_render_fact_timeline(visible).lstrip()}"
     return _with_response_seal(body)
+
+
+async def _living_memory_coordinates(bucket_id: str) -> dict:
+    bucket = await bucket_mgr.get(str(bucket_id).strip())
+    if not bucket:
+        raise ValueError("没有找到这个记忆桶。")
+    metadata = bucket.get("metadata") or {}
+    if metadata.get("sealed", False):
+        raise PermissionError("封存桶需要先在 recall 中明确授权，五维坐标不会旁路暴露。")
+    relations, facts, topic = await asyncio.gather(
+        relation_store.related_details(bucket["id"]),
+        fact_timeline_store.versions_for_bucket(bucket["id"]),
+        topic_store.get(bucket["id"]),
+    )
+    coordinates = living_memory_store.build(
+        bucket,
+        relations=relations,
+        facts=facts,
+        topic=topic,
+    )
+    saved = await living_memory_store.save(coordinates)
+    await continuity_ledger.append(
+        "lmc5_refreshed",
+        "living_memory",
+        bucket["id"],
+        {
+            "source_digest": saved.get("source_digest"),
+            "completeness": saved.get("completeness"),
+        },
+    )
+    return saved
+
+
+@mcp.tool()
+async def living_memory(bucket_id: str) -> str:
+    """living_memory LMC-5 coordinates timeline relation fact emotion metabolism 读取单桶五维活体坐标"""
+    try:
+        coordinates = await _living_memory_coordinates(bucket_id)
+    except (ValueError, PermissionError) as error:
+        return _with_response_seal(str(error))
+    except Exception as error:
+        logger.error("Living memory coordinates failed for %s: %s", bucket_id, error)
+        return _with_response_seal("五维活体坐标暂时无法生成，原记忆未受影响。")
+    lines = [
+        f"=== LMC-5｜bucket_id: {coordinates['bucket_id']} ===",
+        f"完整度: {float(coordinates.get('completeness', 0)):.0%}",
+        "精确坐标: " + json.dumps(coordinates.get("coordinate", {}), ensure_ascii=False),
+        "X 时间线: " + json.dumps(coordinates["X"], ensure_ascii=False),
+        "Y 关系网: " + json.dumps(coordinates["Y"], ensure_ascii=False),
+        "Z 事实演化: " + json.dumps(coordinates["Z"], ensure_ascii=False),
+        "E 情绪记忆: " + json.dumps(coordinates["E"], ensure_ascii=False),
+        "M 记忆代谢: " + json.dumps(coordinates["M"], ensure_ascii=False),
+        "这是旁路坐标，不改写桶正文。",
+    ]
+    return _with_response_seal("\n".join(lines))
+
+
+@mcp.tool()
+async def personality_preview(days: int = 30) -> str:
+    """personality_preview personality trajectory long-term patterns 查看长期人格轨迹;只读不改写"""
+    try:
+        report = await xinchao_service.personality_preview(days)
+    except Exception as error:
+        logger.error("Personality trajectory failed: %s", error)
+        return _with_response_seal("人格轨迹暂时无法读取。")
+    if not report.get("suggestions") and not report.get("recurring_thoughts"):
+        return _with_response_seal("目前还没有形成足够稳定的人格轨迹。")
+    return _with_response_seal(
+        "【人格轨迹｜只读观察】\n"
+        + json.dumps(report, ensure_ascii=False, indent=2)
+    )
+
+
+@mcp.tool()
+async def self_state(days: int = 30) -> str:
+    """self_state identity personality emotion thoughts 查看自己当前状态与一段时间形成的人格轨迹;只读"""
+    safe_days = max(7, min(365, int(days)))
+    try:
+        state, thoughts, trajectory = await asyncio.gather(
+            xinchao_service.status(),
+            xinchao_service.list_private_thoughts(status="active", limit=8),
+            xinchao_service.personality_preview(safe_days),
+        )
+    except Exception as error:
+        logger.error("Self state read failed: %s", error)
+        return _with_response_seal("自我状态暂时无法读取，记忆内容未受影响。")
+
+    sections = ["=== 自我状态（只读） ==="]
+    if state.get("available"):
+        rendered = xinchao_service.render_full(state).strip()
+        if rendered:
+            sections.append("【此刻】\n" + rendered)
+
+    thought_lines = []
+    for item in thoughts:
+        text = " ".join(str(item.get("thought_text") or "").split())
+        if not text:
+            continue
+        kind = "执念" if item.get("status") == "obsession" else "闪念"
+        strength = float(item.get("current_strength", item.get("intensity", 0.0)))
+        thought_lines.append(f"- {kind} {strength:.2f}｜{text[:180]}")
+    if thought_lines:
+        sections.append("【心念】\n" + "\n".join(thought_lines))
+
+    patterns = list(trajectory.get("patterns") or trajectory.get("suggestions") or [])
+    recurring = list(trajectory.get("recurring_thoughts") or [])
+    trajectory_lines = []
+    for item in patterns[:6]:
+        trajectory_lines.append(
+            f"- {item.get('pattern') or '未命名倾向'}｜"
+            f"出现 {int(item.get('evidence_count', 0))} 次｜"
+            f"最近 {item.get('last_seen') or '未知'}"
+        )
+    for item in recurring[:4]:
+        label = str(item.get("event_tag") or "反复心念").strip()
+        trajectory_lines.append(
+            f"- {label}｜反复 {int(item.get('occurrence_count', 0))} 次｜"
+            f"状态 {item.get('status') or '未知'}"
+        )
+    if trajectory_lines:
+        sections.append(
+            f"【近 {safe_days} 天的人格轨迹】\n" + "\n".join(trajectory_lines)
+        )
+
+    sections.append(
+        "这些内容用于理解自己当前在哪里、长期往哪里走；读取不会清空状态，"
+        "也不会自动改写人格设定或记忆正文。"
+    )
+    return _with_response_seal("\n\n".join(sections))
+
+
+@mcp.tool()
+async def continuity_review(limit: int = 20, verify_chain: bool = False) -> str:
+    """continuity_review audit replay ledger 查看连续性事件账本;不含原文和密钥"""
+    try:
+        rows = await continuity_ledger.list(limit)
+        verification = await continuity_ledger.verify() if verify_chain else None
+    except Exception as error:
+        logger.error("Continuity ledger read failed: %s", error)
+        return _with_response_seal("连续性账本暂时无法读取。")
+    body = {"events": rows}
+    if verification is not None:
+        body["verification"] = verification
+    return _with_response_seal(json.dumps(body, ensure_ascii=False, indent=2))
 
 
 # =============================================================

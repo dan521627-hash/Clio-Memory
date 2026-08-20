@@ -174,6 +174,7 @@ class TaskService:
         completion = str(action.get("completion_criterion", "")).strip()
         if task_type not in {"finite_action", "waiting"} or not completion:
             return False
+
         text = " ".join(
             str(action.get(key, "")).strip()
             for key in ("title", "details", "completion_criterion", "evidence")
@@ -203,6 +204,47 @@ class TaskService:
         matches.extend(item for item in recent if int(item["task_id"]) not in seen)
         return matches[: self.max_candidates]
 
+    @staticmethod
+    def _normalized_task_identity(value: str) -> str:
+        return re.sub(r"[\W_]+", "", str(value or "").casefold(), flags=re.UNICODE)
+
+    async def _find_open_duplicate(self, action: dict) -> dict | None:
+        title = str(action.get("title", "")).strip()
+        details = str(action.get("details", "")).strip()
+        completion = str(action.get("completion_criterion", "")).strip()
+        query = " ".join(part for part in (title, details, completion) if part)
+        matches = await self.search(query or title, status="open", limit=8)
+
+        # Search may omit a short exact title when the longer details dominate.
+        # Include recent open items so punctuation-only variants still dedupe.
+        recent = await self.store.list(status="open", limit=50)
+        seen = {int(item["task_id"]) for item in matches}
+        matches.extend(item for item in recent if int(item["task_id"]) not in seen)
+
+        normalized_title = self._normalized_task_identity(title)
+        for item in matches:
+            item_title = str(item.get("title") or "")
+            if (
+                normalized_title
+                and normalized_title == self._normalized_task_identity(item_title)
+            ):
+                return item
+
+        for item in matches:
+            score = float(item.get("match_score", 0.0))
+            if not score:
+                score = self._keyword_score(query or title, item) * 0.94
+            title_ratio = SequenceMatcher(
+                None,
+                normalized_title,
+                self._normalized_task_identity(item.get("title", "")),
+            ).ratio()
+            if score >= self.semantic_threshold and title_ratio >= 0.56:
+                return item
+            if score >= min(0.98, self.semantic_threshold + 0.10) and title_ratio >= 0.38:
+                return item
+        return None
+
     async def _apply_action(
         self,
         action: dict,
@@ -221,10 +263,10 @@ class TaskService:
             title = str(action.get("title", "")).strip()
             if not title:
                 return None
-            duplicates = await self.search(title, status="open", limit=1)
-            if duplicates and float(duplicates[0].get("match_score", 0)) >= self.semantic_threshold:
+            duplicate = await self._find_open_duplicate(action)
+            if duplicate:
                 item = await self.store.update(
-                    int(duplicates[0]["task_id"]),
+                    int(duplicate["task_id"]),
                     source_type=source_type,
                     source_ref=source_ref,
                     source_event_id=event_key,

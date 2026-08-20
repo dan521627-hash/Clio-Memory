@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import tempfile
 from datetime import datetime, timedelta, timezone
@@ -324,6 +325,17 @@ class XinchaoEvaluator:
                 deltas[name] = round(max(-0.8, min(0.8, float(raw_value))), 4)
             except (TypeError, ValueError):
                 continue
+        handoff_ready = bool(result.get("handoff_ready", False))
+        # The model remains the main judge, but explicit closing language is a
+        # deterministic safety net. Avoid generic words such as "结束了" so a
+        # completed event is not mistaken for the end of a conversation.
+        explicit_handoff = bool(
+            re.search(
+                r"(?:换(?:个|一个)?窗口|关(?:掉)?(?:这个)?窗口|结束(?:这个|本次)?窗口|"
+                r"今天就到这里|写给下一个窗口|下个窗口见|我要睡了|我先睡了|晚安)",
+                str(content or ""),
+            )
+        )
         return {
             "event": str(result.get("event", "未命名事件")).strip()[:160]
             or "未命名事件",
@@ -334,7 +346,7 @@ class XinchaoEvaluator:
             "severity": severity,
             "pipes": deltas,
             "narrative_complete": bool(result.get("narrative_complete", True)),
-            "handoff_ready": bool(result.get("handoff_ready", False)),
+            "handoff_ready": handoff_ready or explicit_handoff,
             "quality_note": str(result.get("quality_note", "")).strip()[:200],
             "context_card": str(
                 result.get("context_card", result.get("event", "未命名事件"))

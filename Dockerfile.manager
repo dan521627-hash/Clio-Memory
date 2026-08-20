@@ -1,5 +1,4 @@
-ARG CLIO_BASE_IMAGE=clio-memory:latest
-FROM ${CLIO_BASE_IMAGE}
+FROM ombre-brain-ombre-brain:latest
 
 RUN pip install --no-cache-dir \
     "fastapi>=0.115.0,<1.0.0" \

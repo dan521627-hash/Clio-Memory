@@ -171,6 +171,8 @@ xinchao:
   flash_hours: 24
   obsession_hours: 168
   obsession_repeats: 3
+  thought_feed_limit: 6         # Repeated thoughts retire after this many feeds
+  satisfaction_plateau_hours: 2 # Being heard pauses natural regrowth for these drives
   arrival_gap_minutes: 90        # A new arrival sample requires this much silence
   rhythm_min_samples: 8          # Learn the usual active hours after enough arrivals
   longing_after_hours: 6
@@ -211,6 +213,19 @@ xinchao:
     自省: 8.0
     开心: 6.0
     满足: 3.0
+
+# --- Unified continuity ledger / 连续性事件账本 ---
+# Stores only hashes, timestamps and sidecar outcomes; never stores memory text or secrets.
+continuity_ledger:
+  enabled: true
+  db_path: ""                    # Empty = <buckets_dir>/continuity.sqlite3
+
+# --- LMC-5 living-memory coordinates / 五维活体记忆坐标 ---
+# X timeline, Y relationship graph, Z fact evolution, E emotion, M metabolism.
+# This is an independent SQLite sidecar and never rewrites Markdown buckets.
+living_memory:
+  enabled: true
+  db_path: ""                    # Empty = <buckets_dir>/living_memory.sqlite3
 
 # --- Local semantic embeddings / 本地语义向量 ---
 # Emotion-linked outward behavior.

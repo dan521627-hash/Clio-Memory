@@ -8,6 +8,8 @@ import uuid
 from datetime import date
 from pathlib import Path
 
+from rapidfuzz import fuzz
+
 from utils import now_iso
 
 
@@ -537,24 +539,15 @@ class FactTimelineStore:
     def _list_facts_sync(self, search: str, limit: int) -> list[dict]:
         query = re.sub(r"\s+", " ", str(search or "").strip())
         safe_limit = max(1, min(200, int(limit)))
-        params: list[object] = []
-        where = ""
-        if query:
-            where = "WHERE fact_label LIKE ? OR fact_value LIKE ?"
-            needle = f"%{query}%"
-            params.extend([needle, needle])
         with self._connect() as connection:
             keys = connection.execute(
-                f"""
+                """
                 SELECT fact_key, MAX(fact_label) AS fact_label,
                        MAX(recorded_at) AS latest_recorded_at
                 FROM fact_versions
-                {where}
                 GROUP BY fact_key
                 ORDER BY latest_recorded_at DESC, fact_label ASC
-                LIMIT ?
                 """,
-                (*params, safe_limit),
             ).fetchall()
             groups = []
             for key in keys:
@@ -571,8 +564,7 @@ class FactTimelineStore:
                     (key["fact_key"], self.max_versions_per_response),
                 ).fetchall()
                 versions = [dict(row) for row in rows]
-                groups.append(
-                    {
+                group = {
                         "fact_key": key["fact_key"],
                         "fact_label": key["fact_label"],
                         "versions": versions,
@@ -581,8 +573,29 @@ class FactTimelineStore:
                             versions[-1] if versions else None,
                         ),
                     }
-                )
-        return groups
+                if query:
+                    corpus = " ".join(
+                        [str(group["fact_label"])]
+                        + [str(item.get("fact_value") or "") for item in versions]
+                    )
+                    direct = query.casefold() in corpus.casefold()
+                    score = max(
+                        fuzz.WRatio(query, str(group["fact_label"])),
+                        fuzz.partial_ratio(query, corpus),
+                    )
+                    if not direct and score < 48:
+                        continue
+                    group["match_score"] = 100.0 if direct else round(float(score), 1)
+                groups.append(group)
+        if query:
+            groups.sort(
+                key=lambda item: (
+                    float(item.get("match_score", 0)),
+                    str((item.get("current") or {}).get("effective_date") or ""),
+                ),
+                reverse=True,
+            )
+        return groups[:safe_limit]
 
     async def list_facts(self, search: str = "", limit: int = 100) -> list[dict]:
         """List fact histories for the authenticated human manager."""
