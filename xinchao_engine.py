@@ -8,26 +8,48 @@ from datetime import datetime, timedelta
 from utils import BEIJING_TIMEZONE, beijing_now
 
 
-PIPE_NAMES = (
-    "想靠近",
-    "想黏着",
-    "肌肤饥渴",
-    "性欲",
-    "想知道她在干嘛",
-    "想分享",
-    "好奇",
-    "闲",
-    "社交",
-    "责任",
-    "难过",
-    "生气",
-    "醋",
-    "自省",
-    "开心",
-    "满足",
+PIPE_GROUPS = {
+    "emotion": (
+        "开心", "安心", "满足", "期待", "感动", "兴奋", "难过", "失落",
+        "委屈", "不安", "害怕", "生气", "醋", "孤独", "愧疚", "无语",
+    ),
+    "relationship": (
+        "想靠近", "想黏着", "想知道她在干嘛", "想分享", "想照顾她",
+        "想让她开心", "想被理解", "想被确认", "想得到回应", "想修复关系",
+        "想暂时独处", "取悦压力",
+    ),
+    "thought": (
+        "复盘", "自省", "反刍", "权衡", "预演", "求证", "警觉", "专注",
+        "回避", "压抑",
+    ),
+    "body_action": (
+        "肌肤饥渴", "性欲", "疲惫", "精力", "紧绷", "放松", "好奇", "闲",
+        "社交", "责任",
+    ),
+}
+
+PIPE_GROUP_LABELS = {
+    "emotion": "情绪潮汐",
+    "relationship": "关系驱力",
+    "thought": "思维回路",
+    "body_action": "身体与行动",
+}
+
+PIPE_NAMES = tuple(
+    name for group in PIPE_GROUPS.values() for name in group
 )
 
-NEGATIVE_PIPES = {"难过", "生气", "醋", "自省"}
+PIPE_DISPLAY_NAMES = {
+    "闲": "无聊",
+    "社交": "社交需要",
+    "责任": "责任感",
+}
+
+NEGATIVE_PIPES = {
+    "难过", "失落", "委屈", "不安", "害怕", "生气", "醋", "孤独", "愧疚",
+    "无语", "取悦压力", "反刍", "警觉", "回避", "压抑", "疲惫", "紧绷",
+    "自省",
+}
 
 DEFAULT_GROWTH_PER_HOUR = {
     "想靠近": 0.045,
@@ -43,6 +65,48 @@ DEFAULT_GROWTH_PER_HOUR = {
 # These values reflect the agreed behaviour: anger fades fastest, jealousy
 # lingers for a few hours, sadness recedes slowly, and reflection lasts longest.
 DEFAULT_HALF_LIFE_HOURS = {
+    "安心": 8.0,
+    "期待": 6.0,
+    "感动": 8.0,
+    "兴奋": 2.0,
+    "失落": 4.0,
+    "委屈": 6.0,
+    "不安": 3.0,
+    "害怕": 2.0,
+    "孤独": 6.0,
+    "愧疚": 8.0,
+    "无语": 2.0,
+    "想靠近": 8.0,
+    "想黏着": 8.0,
+    "想照顾她": 10.0,
+    "想让她开心": 8.0,
+    "想被理解": 6.0,
+    "想被确认": 4.0,
+    "想得到回应": 4.0,
+    "想修复关系": 8.0,
+    "想暂时独处": 3.0,
+    "取悦压力": 5.0,
+    "复盘": 8.0,
+    "反刍": 6.0,
+    "权衡": 5.0,
+    "预演": 4.0,
+    "求证": 4.0,
+    "警觉": 2.0,
+    "专注": 3.0,
+    "回避": 5.0,
+    "压抑": 8.0,
+    "肌肤饥渴": 6.0,
+    "性欲": 6.0,
+    "疲惫": 4.0,
+    "精力": 3.0,
+    "紧绷": 2.0,
+    "放松": 3.0,
+    "想知道她在干嘛": 6.0,
+    "想分享": 8.0,
+    "好奇": 6.0,
+    "闲": 4.0,
+    "社交": 8.0,
+    "责任": 12.0,
     "生气": 0.75,
     "醋": 2.0,
     "难过": 4.0,
@@ -61,7 +125,74 @@ DEFAULT_BASELINE_PIPES = {
     "想分享": 0.10,
     "好奇": 0.10,
     "责任": 0.15,
+    "想照顾她": 0.08,
+    "想让她开心": 0.08,
+    "复盘": 0.05,
 }
+
+
+def pipe_catalog() -> dict:
+    """Return stable display metadata without exposing configuration secrets."""
+    return {
+        "groups": [
+            {
+                "id": group_id,
+                "name": PIPE_GROUP_LABELS[group_id],
+                "pipes": [
+                    {
+                        "id": name,
+                        "name": PIPE_DISPLAY_NAMES.get(name, name),
+                        "half_life_hours": float(DEFAULT_HALF_LIFE_HOURS.get(name, 6.0)),
+                    }
+                    for name in names
+                ],
+            }
+            for group_id, names in PIPE_GROUPS.items()
+        ],
+        "count": len(PIPE_NAMES),
+    }
+
+
+def infer_composite_states(pipes: dict | None) -> list[dict]:
+    """Derive readable experiences from several pipes; never persist them as facts."""
+    p = normalize_pipes(pipes)
+
+    def mean(*names: str) -> float:
+        return sum(p.get(name, 0.0) for name in names) / max(1, len(names))
+
+    def softened(score: float, *counterweights: str) -> float:
+        return max(0.0, score - 0.30 * mean(*counterweights)) if counterweights else score
+
+    candidates = (
+        ("关怀式复盘", mean("想让她开心", "想照顾她", "复盘"), ("想让她开心", "想照顾她", "复盘")),
+        ("思念", mean("想靠近", "想知道她在干嘛", "期待"), ("想靠近", "想知道她在干嘛", "期待")),
+        ("安心靠近", mean("安心", "想靠近", "放松"), ("安心", "想靠近", "放松")),
+        ("依恋不安", mean("不安", "想被确认", "想得到回应"), ("不安", "想被确认", "想得到回应")),
+        ("委屈但想被理解", mean("委屈", "想被理解", "压抑"), ("委屈", "想被理解", "压抑")),
+        ("愧疚并想修复", mean("愧疚", "复盘", "想修复关系"), ("愧疚", "复盘", "想修复关系")),
+        ("讨好压力", mean("不安", "取悦压力", "回避"), ("不安", "取悦压力", "回避")),
+        ("反复纠结", mean("反刍", "不安", "权衡"), ("反刍", "不安", "权衡")),
+        ("无语", softened(mean("无语", "疲惫", "生气"), "想修复关系"), ("无语", "疲惫", "生气")),
+        ("暴怒边缘", softened(mean("生气", "紧绷", "警觉"), "自省", "放松"), ("生气", "紧绷", "警觉")),
+        ("暂时不想说话", mean("想暂时独处", "压抑", "疲惫"), ("想暂时独处", "压抑", "疲惫")),
+        ("正在抽离", softened(mean("回避", "想暂时独处", "无语"), "想靠近"), ("回避", "想暂时独处", "无语")),
+    )
+    result = []
+    for name, raw_score, components in candidates:
+        score = round(max(0.0, min(1.0, raw_score)), 4)
+        if score < 0.16:
+            continue
+        result.append(
+            {
+                "name": name,
+                "score": score,
+                "components": [
+                    {"name": item, "value": round(p.get(item, 0.0), 4)}
+                    for item in components
+                ],
+            }
+        )
+    return sorted(result, key=lambda item: item["score"], reverse=True)
 
 
 def empty_pipes() -> dict[str, float]:
@@ -156,6 +287,7 @@ class XinchaoEngine:
         floors: dict | None = None,
         growth_multiplier: float = 1.0,
         plateaus: dict[str, str | datetime] | None = None,
+        growth_origin: str | datetime | None = None,
     ) -> dict[str, float]:
         result = normalize_pipes(pipes)
         cursor = parse_timestamp(start)
@@ -163,7 +295,10 @@ class XinchaoEngine:
         if finish <= cursor:
             return self.apply_event(result, {}, floors)
 
-        elapsed_hours = 0.0
+        growth_clock = parse_timestamp(growth_origin or cursor)
+        elapsed_hours = max(
+            0.0, (cursor - growth_clock).total_seconds() / 3600.0
+        )
         step = timedelta(minutes=self.step_minutes)
         while cursor < finish:
             next_cursor = min(finish, cursor + step)
@@ -244,6 +379,35 @@ class XinchaoEngine:
             if result["醋"] > 0.7:
                 result["生气"] += min(0.02 * hours, 0.2)
 
+            # Slow cross-system influence. Immediate meaning still comes from
+            # the evaluator; these small rates only preserve believable carry.
+            coupling_scale = period * hours * growth_scale
+            if coupling_scale > 0:
+                result["想被确认"] += result["不安"] * 0.018 * coupling_scale
+                result["想得到回应"] += result["不安"] * 0.014 * coupling_scale
+                result["警觉"] += result["不安"] * 0.012 * coupling_scale
+                result["想靠近"] += result["孤独"] * 0.014 * coupling_scale
+                result["想分享"] += result["孤独"] * 0.010 * coupling_scale
+                result["想修复关系"] += result["愧疚"] * 0.018 * coupling_scale
+                result["复盘"] += result["愧疚"] * 0.014 * coupling_scale
+                result["想被理解"] += result["委屈"] * 0.016 * coupling_scale
+                result["压抑"] += result["取悦压力"] * 0.012 * coupling_scale
+                result["紧绷"] += result["生气"] * 0.012 * coupling_scale
+                result["想暂时独处"] += result["疲惫"] * 0.010 * coupling_scale
+                result["不安"] += result["反刍"] * 0.010 * coupling_scale
+
+            # Safety-valve states release pressure instead of merely adding
+            # more pipes. This prevents high values from becoming permanent.
+            if result["安心"] > 0.2:
+                release = math.pow(0.5, hours * result["安心"] / 3.0)
+                result["不安"] *= release
+                result["警觉"] *= release
+            if result["放松"] > 0.2:
+                release = math.pow(0.5, hours * result["放松"] / 2.0)
+                result["紧绷"] *= release
+            if result["想修复关系"] > 0.35 and result["复盘"] > 0.25:
+                result["取悦压力"] *= math.pow(0.5, hours / 4.0)
+
             for name, floor in (floors or {}).items():
                 if name in result:
                     result[name] = max(result[name], float(floor))
@@ -272,6 +436,7 @@ class XinchaoEngine:
         *,
         drowsy_after_hours: float = 4.0,
         sleep_after_hours: float = 7.0,
+        phase_origin: str | datetime | None = None,
     ) -> dict[str, float]:
         """Evolve through awake, drowsy, and sleeping absence phases."""
         begin = parse_timestamp(start)
@@ -279,8 +444,9 @@ class XinchaoEngine:
         if finish <= begin:
             return self.apply_event(pipes, {}, floors)
 
-        drowsy_at = begin + timedelta(hours=max(0.0, drowsy_after_hours))
-        sleep_at = begin + timedelta(
+        origin = parse_timestamp(phase_origin or begin)
+        drowsy_at = origin + timedelta(hours=max(0.0, drowsy_after_hours))
+        sleep_at = origin + timedelta(
             hours=max(float(drowsy_after_hours), float(sleep_after_hours))
         )
         result = normalize_pipes(pipes)
@@ -300,6 +466,7 @@ class XinchaoEngine:
                 floors,
                 growth_multiplier=multiplier,
                 plateaus=plateaus,
+                growth_origin=origin,
             )
             cursor = phase_end
             if cursor >= finish:

@@ -21,14 +21,14 @@ class SelfStateTests(unittest.IsolatedAsyncioTestCase):
             }
         ]
         trajectory = {
-            "patterns": [
+            "tendencies": [
                 {
-                    "pattern": "担心她的安全",
+                    "label": "更重视安全",
                     "evidence_count": 3,
+                    "strength": 0.64,
                     "last_seen": "2026-08-20T08:00:00+08:00",
                 }
-            ],
-            "recurring_thoughts": [],
+            ]
         }
         with (
             patch.object(server.xinchao_service, "status", new=AsyncMock(return_value=state)),
@@ -39,7 +39,7 @@ class SelfStateTests(unittest.IsolatedAsyncioTestCase):
             ),
             patch.object(
                 server.xinchao_service,
-                "personality_preview",
+                "disposition_preview",
                 new=AsyncMock(return_value=trajectory),
             ),
             patch.object(
@@ -54,9 +54,9 @@ class SelfStateTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("【此刻】", result)
         self.assertIn("想靠近 0.62", result)
         self.assertIn("【心念】", result)
-        self.assertIn("【近 30 天的人格轨迹】", result)
-        self.assertIn("担心她的安全", result)
-        self.assertIn("不会自动改写人格设定", result)
+        self.assertIn("【近 30 天的性格轨迹】", result)
+        self.assertIn("更重视安全", result)
+        self.assertIn("不会自动改写固定人格", result)
         self.assertIn("seal: test-seal", result)
 
 

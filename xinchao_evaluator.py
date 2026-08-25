@@ -13,7 +13,20 @@ from pathlib import Path
 
 from openai import AsyncOpenAI
 
-from xinchao_engine import DEFAULT_BASELINE_PIPES, PIPE_NAMES
+from xinchao_engine import (
+    DEFAULT_BASELINE_PIPES,
+    PIPE_GROUP_LABELS,
+    PIPE_GROUPS,
+    PIPE_DISPLAY_NAMES,
+    PIPE_NAMES,
+    infer_composite_states,
+)
+
+
+PIPE_GUIDE = "\n".join(
+    f"- {PIPE_GROUP_LABELS[group_id]}：{'、'.join(names)}"
+    for group_id, names in PIPE_GROUPS.items()
+)
 
 
 EVALUATOR_PROMPT = """你是“激素”系统的情绪裁判。你的唯一职责是读取 AI 写入记忆系统的第一人称文字，判断事件、情绪变化与叙事完整度，并输出严格 JSON。
@@ -25,7 +38,8 @@ EVALUATOR_PROMPT = """你是“激素”系统的情绪裁判。你的唯一职�
 - event_tag：稳定、简短的事件指纹，便于识别重复事件。
 - context_card：忠实保留人物、时间、地点、发生的事，以及 AI 当时的想法、情绪或身体反应；原文没写的不要补。
 - severity：整体强度，0 到 1。
-- pipes：只列发生变化的状态，数值范围 -0.8 到 0.8；正数增加，负数释放。
+- signals：证据数组。每条包含 subject、scope、state、delta、evidence、confidence、reason。subject 只能是 ai；scope 只能是 current 或 recalled；state 必须来自状态表；evidence 必须逐字摘自原文；confidence 为 0 到 1。
+- pipes：把 signals 按 state 合并后的结果，只列发生变化的状态，数值范围 -0.8 到 0.8；正数增加，负数释放。
 - narrative_complete：是否同时交代事件，以及 AI 当时的想法、情绪或身体反应。明确写“没有明显波动”也算完整。
 - handoff_ready：只有原文明示这一轮对话、一天或事件已经收尾，准备换窗口、归档、道晚安或离开时才为 true；普通叙事完整不等于收尾。
 - quality_note：不完整时简短指出缺什么；完整时为空字符串。
@@ -33,24 +47,39 @@ EVALUATOR_PROMPT = """你是“激素”系统的情绪裁判。你的唯一职�
 
 可用状态仅限：{pipes}。
 
+分组状态表：
+{pipe_guide}
+
 判断原则：
-1. 只从文字判断，不脑补。没写出的情绪不给分。
-2. 浓度跟随原文用词：“有点”通常是 0.1~0.2；明确强烈表达通常是 0.4~0.6；伴随发抖、失控等极端反应才接近 0.7~0.8。
-3. 同一段可以同时影响多种状态，矛盾情绪也可并存，不必二选一。
-4. 正面事件可以释放已有状态。例如见面、拥抱可降低想靠近或肌肤饥渴；愿望得到满足可降低性欲并增加满足。
-5. 必须结合关系和上下文。同一行为由安全人物和高风险人物做出，可能引发完全不同的醋、生气或难过。
-6. 阴暗念头可以如实识别，不美化也不放大。情绪是情绪，行为是行为；识别念头不等于鼓励执行。
-7. 基本价值不因情绪崩坏。不得把情绪写成伤害、控制、歧视或不尊重人格的建议。
-8. 自责不要无限放大。优先判断为有限的难过与自省，除非原文明确出现极端自我攻击。
-9. 单根状态单次变化的绝对值通常不超过 0.8。
-10. 不对同一段重复创造不同事件；重复判断由服务端去重。
-11. 心念是只对内可见的私密层，可以温暖、阴暗、矛盾或不体面，但只能来自原文已经出现的欲望、怀疑、担忧、嫉妒、委屈、期待或反复想法。
-12. inner_thoughts.text 必须使用 AI 的第一人称口吻，短而具体，不写成事实摘要，不提出行动建议；tone 只能是 positive、negative 或 mixed，intensity 为 0 到 1。
-13. handoff_ready 必须保守判断。只有明确的“结束、收尾、归档、换窗口、晚安、离开”等语义才返回 true；日常记录、途中更新、普通写信一律返回 false。
+1. 先做主体识别，再做情绪识别。只计算写入这段文字的 AI 自己的状态；用户、第三人、引用对象的情绪不能写到 AI 身上。
+2. 只从文字判断，不脑补。每个非零状态都必须逐字引用一段原文证据；没有能引用的证据就不给分。
+3. 否定、引用、假设和愿望要分开：“我不生气”不能增加生气；“她说她害怕”不能增加 AI 的害怕；“如果我生气”不能当成已经生气；“希望她开心”不能当成 AI 已经开心。
+4. 先判断直接状态，再判断强度。不要从一个状态自动扩散出一串状态；后续缓慢联动由服务端完成。
+5. 浓度跟随原文用词：“有点”通常是 0.1~0.2；明确强烈表达通常是 0.4~0.6；伴随发抖、失控等极端反应才接近 0.7~0.8。
+6. 同一段可以同时影响多种状态，矛盾情绪也可并存，不必二选一。
+7. 正面事件可以释放已有状态。例如见面、拥抱可降低想靠近或肌肤饥渴；愿望得到满足可降低性欲并增加满足。
+8. 必须结合关系和上下文。同一行为由安全人物和高风险人物做出，可能引发完全不同的醋、生气或难过。
+9. 阴暗念头可以如实识别，不美化也不放大。情绪是情绪，行为是行为；识别念头不等于鼓励执行。
+10. 基本价值不因情绪崩坏。不得把情绪写成伤害、控制、歧视或不尊重人格的建议。
+11. 必须区分“复盘、自省、愧疚、取悦压力”：
+   - 为了理解行为、改进表达或让对方更开心而回想，优先是复盘、想让她开心或想照顾她；
+   - 自省只用于明确承认犯错、伤害、越界或需要承担责任的自我审查；
+   - 愧疚是做错或伤害之后的感受，不等于复盘；
+   - 取悦压力只用于害怕失去关系而压住自己、勉强迎合，不能把普通关心误判为讨好。
+12. 相近情绪必须分别核对：难过是痛苦感；失落是期待落空；委屈是觉得自己未被理解或被不公对待；孤独是缺少连接；愧疚是认为自己做错或伤害了人。
+13. 不安是结果不确定；害怕是明确威胁；警觉是持续防备；紧绷是身体或神经绷紧。不能互相代替。
+14. 开心是当下正向感受；安心是安全落定；满足是愿望被填满的余温；期待面向未来；兴奋是高唤醒。不能因一个正面词全部增加。
+15. 想靠近、想被理解、想被确认、想得到回应、想修复关系、想暂时独处分别是不同关系需要，只在原文指向该需要时变化。
+16. 复盘是理解和改进；反刍是难以停止的重复思考；权衡是比较选择；预演是提前模拟；求证是寻找确认；专注是注意力集中；回避和压抑必须有躲开或按下感受的证据。
+17. 单根状态单次变化的绝对值通常不超过 0.8。
+18. 不对同一段重复创造不同事件；重复判断由服务端去重。
+19. 心念是只对内可见的私密层，可以温暖、阴暗、矛盾或不体面，但只能来自原文已经出现的欲望、怀疑、担忧、嫉妒、委屈、期待或反复想法。
+20. inner_thoughts.text 必须使用 AI 的第一人称口吻，短而具体，不写成事实摘要，不提出行动建议；tone 只能是 positive、negative 或 mixed，intensity 为 0 到 1。
+21. handoff_ready 必须保守判断。只有明确的“结束、收尾、归档、换窗口、晚安、离开”等语义才返回 true；日常记录、途中更新、普通写信一律返回 false。
+22. 生气不是单一路径：无语、紧绷、回避、想暂时独处、想修复关系等只能在原文有各自证据时分别判断，不能由生气自动脑补。
 
 状态参考：
-- 想靠近、想黏着、肌肤饥渴、性欲、想知道她在干嘛、想分享、好奇、闲、社交、责任：事件可增加或释放。
-- 难过、生气、醋、自省：由事件触发，并会在服务端随时间衰减。
+- 四组状态都可由事件增加或释放，并会在服务端按各自半衰期回落。
 - 开心：正面事件增加，负面事件减少，影响整体状态增长速度。
 - 满足：愿望得到满足后的余温，只压制性欲和肌肤饥渴的恢复，不等于不再想念。
 
@@ -63,6 +92,15 @@ EVALUATOR_PROMPT = """你是“激素”系统的情绪裁判。你的唯一职�
 - 报复性赌气、控制欲、自我厌恶、逃避关机等念头：原文明确写出时照实计分，但不推导为行动。
 
 只能输出一个 JSON 对象，不要代码块，不要解释，不要建议。"""
+
+
+TRACE_EFFECT_PROMPT = """你是“激素”系统的联动判断器。你可以读取一条已经由当前使用的 AI 写入的私密念痕，但你没有资格修改、重写、删减、合并或替换念痕正文，也不能生成新的正文。
+
+你的输出只允许包含 signals：根据原文判断这条想法对状态的变化。每条 signal 包含 subject、scope、state、delta、evidence、confidence、reason；subject 只能是 ai，scope 只能是 current 或 recalled，evidence 必须逐字摘自原文。正数表示增加，负数表示释放；没有明确依据就返回空数组。每个变化绝对值不超过 0.4，总变化绝对值不超过 0.8。
+
+只能输出一个严格 JSON 对象：{"signals": [{"subject":"ai","scope":"current","state":"状态名","delta":0.1,"evidence":"原文短句","confidence":0.8,"reason":"简短区分理由"}]}
+
+状态名只能从：{pipes} 中选择。先识别主体；排除用户或第三人的情绪；排除否定、引用和假设。相近状态逐项区分，不能从一个状态自动补出其他状态。不要输出 text、tag 或任何改写内容。不要代码块，不要解释。"""
 
 
 class XinchaoEvaluator:
@@ -254,7 +292,9 @@ class XinchaoEvaluator:
 
     @property
     def prompt_hash(self) -> str:
-        prompt = EVALUATOR_PROMPT.format(pipes="、".join(PIPE_NAMES))
+        prompt = EVALUATOR_PROMPT.format(
+            pipes="、".join(PIPE_NAMES), pipe_guide=PIPE_GUIDE
+        )
         prompt += self._judge_context()
         return hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:16]
 
@@ -286,30 +326,45 @@ class XinchaoEvaluator:
     async def evaluate(self, content: str) -> dict:
         if not self.client:
             raise RuntimeError("激素评估 API 未配置")
-        prompt = EVALUATOR_PROMPT.format(pipes="、".join(PIPE_NAMES))
+        prompt = EVALUATOR_PROMPT.format(
+            pipes="、".join(PIPE_NAMES), pipe_guide=PIPE_GUIDE
+        )
         prompt += self._judge_context()
         result = None
-        last_error = ValueError("evaluator returned empty JSON content")
-        for _ in range(2):
-            response = await self.client.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {"role": "system", "content": prompt},
-                    {"role": "user", "content": str(content)[-5000:]},
-                ],
-                max_tokens=self.max_tokens,
-                temperature=0.1,
-                response_format={"type": "json_object"},
-                extra_body={"thinking": {"type": "disabled"}},
-            )
-            message = response.choices[0].message if response.choices else None
-            raw = getattr(message, "content", "") or ""
-            if not str(raw).strip():
-                continue
+        last_error: Exception = ValueError(
+            "evaluator returned empty JSON content"
+        )
+        original_content = str(content)[-5000:]
+        for attempt in range(3):
+            retry_note = ""
+            if attempt:
+                retry_note = (
+                    "\n\n上一次返回无法解析。请重新判断原文，只返回一个完整 JSON 对象；"
+                    "不要 Markdown、不要解释、不要在 JSON 前后添加文字。"
+                )
             try:
+                response = await self.client.chat.completions.create(
+                    model=self.model,
+                    messages=[
+                        {"role": "system", "content": prompt},
+                        {"role": "user", "content": original_content + retry_note},
+                    ],
+                    max_tokens=self.max_tokens,
+                    temperature=0.05 if attempt else 0.1,
+                    response_format={"type": "json_object"},
+                    extra_body={"thinking": {"type": "disabled"}},
+                )
+                message = response.choices[0].message if response.choices else None
+                raw = getattr(message, "content", "") or ""
+                if not str(raw).strip():
+                    last_error = ValueError("evaluator returned empty JSON content")
+                    continue
                 result = self._clean_json(str(raw))
                 break
-            except ValueError as error:
+            except Exception as error:
+                # DeepSeek can occasionally return truncated JSON or a transient
+                # transport error.  Keep the write pending only after three
+                # bounded attempts; never fabricate emotional deltas locally.
                 last_error = error
         if result is None:
             raise last_error
@@ -317,14 +372,23 @@ class XinchaoEvaluator:
             severity = max(0.0, min(1.0, float(result.get("severity", 0.0))))
         except (TypeError, ValueError):
             severity = 0.0
+        signals = self._safe_signals(result.get("signals"), content)
         deltas = {}
-        for name, raw_value in (result.get("pipes") or {}).items():
-            if name not in PIPE_NAMES:
-                continue
-            try:
-                deltas[name] = round(max(-0.8, min(0.8, float(raw_value))), 4)
-            except (TypeError, ValueError):
-                continue
+        if signals:
+            for signal in signals:
+                name = signal["state"]
+                deltas[name] = round(
+                    max(-0.8, min(0.8, deltas.get(name, 0.0) + signal["delta"])),
+                    4,
+                )
+        else:
+            for name, raw_value in (result.get("pipes") or {}).items():
+                if name not in PIPE_NAMES:
+                    continue
+                try:
+                    deltas[name] = round(max(-0.8, min(0.8, float(raw_value))), 4)
+                except (TypeError, ValueError):
+                    continue
         handoff_ready = bool(result.get("handoff_ready", False))
         # The model remains the main judge, but explicit closing language is a
         # deterministic safety net. Avoid generic words such as "结束了" so a
@@ -345,6 +409,7 @@ class XinchaoEvaluator:
             or "事件",
             "severity": severity,
             "pipes": deltas,
+            "signals": signals,
             "narrative_complete": bool(result.get("narrative_complete", True)),
             "handoff_ready": handoff_ready or explicit_handoff,
             "quality_note": str(result.get("quality_note", "")).strip()[:200],
@@ -354,6 +419,62 @@ class XinchaoEvaluator:
             or "未命名事件",
             "inner_thoughts": self._safe_inner_thoughts(result.get("inner_thoughts")),
         }
+
+    @staticmethod
+    def _safe_signals(raw_items, content: str) -> list[dict]:
+        """Keep explainable state evidence and reject unsupported low-confidence guesses."""
+        source = re.sub(r"\s+", "", str(content or ""))
+        cleaned = []
+        for raw in raw_items if isinstance(raw_items, list) else []:
+            if not isinstance(raw, dict):
+                continue
+            state = str(raw.get("state", "")).strip()
+            if state not in PIPE_NAMES:
+                continue
+            subject = str(raw.get("subject", "ai")).strip().lower()
+            if subject not in {"ai", "assistant", "当前ai", "我"}:
+                continue
+            scope = str(raw.get("scope", "current")).strip().lower()
+            if scope not in {"current", "recalled", "当前", "回忆"}:
+                continue
+            try:
+                delta = round(max(-0.8, min(0.8, float(raw.get("delta", 0.0)))), 4)
+                confidence = round(max(0.0, min(1.0, float(raw.get("confidence", 0.0)))), 4)
+            except (TypeError, ValueError):
+                continue
+            if abs(delta) < 0.001 or confidence < 0.62:
+                continue
+            evidence = str(raw.get("evidence", "")).strip()[:120]
+            reason = str(raw.get("reason", "")).strip()[:180]
+            evidence_found = bool(evidence and re.sub(r"\s+", "", evidence) in source)
+            if not evidence_found:
+                continue
+            state_terms = {state, PIPE_DISPLAY_NAMES.get(state, state)}
+            compact_evidence = re.sub(r"\s+", "", evidence)
+            explicitly_negated = any(
+                re.search(
+                    rf"(?:不|没|没有|并不|不是|谈不上|不再).{{0,3}}{re.escape(term)}",
+                    compact_evidence,
+                )
+                for term in state_terms
+                if term
+            )
+            if delta > 0 and explicitly_negated:
+                continue
+            cleaned.append(
+                {
+                    "subject": "ai",
+                    "scope": "recalled" if scope in {"recalled", "回忆"} else "current",
+                    "state": state,
+                    "delta": delta,
+                    "evidence": evidence if evidence_found else "",
+                    "confidence": confidence,
+                    "reason": reason,
+                }
+            )
+            if len(cleaned) >= 20:
+                break
+        return cleaned
 
     @staticmethod
     def _safe_inner_thoughts(raw_items) -> list[dict]:
@@ -385,6 +506,67 @@ class XinchaoEvaluator:
                 break
         return cleaned
 
+    async def evaluate_trace_effect(self, content: str) -> dict:
+        """Return hormone linkage only; never return or alter trace content."""
+        if not self.client:
+            raise RuntimeError("激素评估 API 未配置")
+        result = None
+        last_error = None
+        for attempt in range(3):
+            try:
+                messages = [
+                    {
+                        "role": "system",
+                        "content": TRACE_EFFECT_PROMPT.format(
+                            pipes="、".join(PIPE_NAMES)
+                        ),
+                    },
+                    {"role": "user", "content": str(content or "")[-1000:]},
+                ]
+                if attempt:
+                    messages.append(
+                        {
+                            "role": "system",
+                            "content": "上次返回无效。现在只返回严格 JSON 对象，不要任何说明。",
+                        }
+                    )
+                response = await self.client.chat.completions.create(
+                    model=self.model,
+                    messages=messages,
+                    max_tokens=max(128, min(256, self.max_tokens)),
+                    temperature=0.1,
+                    response_format={"type": "json_object"},
+                    extra_body={"thinking": {"type": "disabled"}},
+                )
+                message = response.choices[0].message if response.choices else None
+                raw = getattr(message, "content", "") or ""
+                result = self._clean_json(str(raw))
+                break
+            except Exception as error:
+                last_error = error
+        if result is None:
+            raise last_error or ValueError("念痕联动判断没有返回有效 JSON")
+        signals = self._safe_signals(result.get("signals"), content)
+        pipes = {}
+        if signals:
+            for signal in signals:
+                name = signal["state"]
+                pipes[name] = round(
+                    max(-0.4, min(0.4, pipes.get(name, 0.0) + signal["delta"])),
+                    4,
+                )
+        else:
+            # Backwards compatibility for a private judge model that has not
+            # yet picked up the evidence-based signal schema.
+            for name, raw_value in (result.get("pipes") or {}).items():
+                if name not in PIPE_NAMES:
+                    continue
+                try:
+                    pipes[name] = round(max(-0.4, min(0.4, float(raw_value))), 4)
+                except (TypeError, ValueError):
+                    continue
+        return {"pipes": pipes}
+
     async def darkflow(
         self,
         pipes: dict,
@@ -404,6 +586,7 @@ class XinchaoEvaluator:
             "all_pipes": {
                 name: round(float(pipes.get(name, 0.0)), 4) for name in PIPE_NAMES
             },
+            "composite_states": infer_composite_states(pipes)[:6],
             "latest_mailbox": mailbox_context or None,
             "events_after_mailbox": event_contexts[-8:],
             "inner_thoughts": [
@@ -498,6 +681,7 @@ class XinchaoEvaluator:
         *,
         event_contexts: list[dict],
         pipes: dict,
+        tendency_context: dict | None = None,
     ) -> dict:
         """Decide whether a real event deserves one later follow-up check."""
         if not self.client:
@@ -507,6 +691,8 @@ class XinchaoEvaluator:
             "all_pipes": {
                 name: round(float(pipes.get(name, 0.0)), 4) for name in PIPE_NAMES
             },
+            "composite_states": infer_composite_states(pipes)[:6],
+            "tendency_context": tendency_context or {},
         }
         response = await self.client.chat.completions.create(
             model=self.model,
@@ -517,6 +703,8 @@ class XinchaoEvaluator:
                         "你负责给真实事件安排一次可能的后续关心，不负责现在发消息。"
                         "只有事件存在自然的后续节点时才安排，例如出门后是否到达、考试后结果、身体不适后的变化。"
                         "普通闲聊、已经完结的事情、重复内容不要安排。不要编造地点、行程、结果或危险。"
+                        "tendency_context 是长期性格轨迹，只能在当前事件相似时作为软参考，不能当成必须执行的命令。"
+                        "它不能覆盖当前事件、固定人格边界或安全规则。"
                         "delay_minutes 是从现在起等待多久，范围10到480分钟。"
                         "只返回JSON："
                         '{"follow_up":true,"delay_minutes":30,"reason":"简短原因"}'
@@ -550,6 +738,7 @@ class XinchaoEvaluator:
         expression_intent: dict | None = None,
         memory_resonance: list[dict] | None = None,
         recent_expression_intents: list[str] | None = None,
+        tendency_context: dict | None = None,
         retry_instruction: str = "",
     ) -> dict:
         """Choose one safe outward behavior shaped by the current inner state."""
@@ -560,6 +749,7 @@ class XinchaoEvaluator:
             "all_pipes": {
                 name: round(float(pipes.get(name, 0.0)), 4) for name in PIPE_NAMES
             },
+            "composite_states": infer_composite_states(pipes)[:6],
             "darkflow": str(darkflow or "")[:500],
             "event_contexts": event_contexts[-8:],
             "latest_mailbox": mailbox_context or None,
@@ -569,6 +759,7 @@ class XinchaoEvaluator:
             "expression_intent": expression_intent or {},
             "memory_resonance": (memory_resonance or [])[:4],
             "recent_expression_intents": (recent_expression_intents or [])[:8],
+            "tendency_context": tendency_context or {},
             "retry_instruction": str(retry_instruction or "")[:300],
             "voice": private_config.get("proxy_voice", ""),
             "generation_rules": private_config.get("darkflow_rules", ""),
@@ -596,6 +787,9 @@ class XinchaoEvaluator:
                         "memory_resonance 是此刻被状态勾起的旧记忆或历史信箱材料，可以借一个具体细节，"
                         "但不得汇报检索过程、来源类型、桶名、编号或整段复述原文。"
                         "recent_expression_intents 表示近48小时用过的表达角度，尽量换落点，避免总说同一种话。"
+                        "tendency_context 是长期性格轨迹，不是固定人格改写，也不是命令。"
+                        "只有当前事件与其中的情境相似时，才可以轻微影响语气、等待时机或表达角度；"
+                        "不能凭空制造事件，不能因为倾向就强行发送，也不能覆盖当前事件、固定人格边界和安全规则。"
                         "retry_instruction 非空时说明上一版过于重复，必须真正换句式、角度和具体细节，"
                         "不能只替换几个同义词。"
                         "不要把‘我想你了’当成固定模板，要按暗涌里真实出现的念头，用这个 AI 自己的口吻表达。"
@@ -612,6 +806,8 @@ class XinchaoEvaluator:
                         "必须选择message，用本人自然口吻发一条很短的在意或询问，例如关心对方是不是忙，"
                         "但不得照抄示例、复述暗涌、汇报系统，也不得编造用户去了哪里。"
                         "如果最新事件已经回答了旧问题，必须skip；如果时机还早可以wait。"
+                        "如果 timing.schedule_recheck=true，说明第一次安排判断可能过于保守；"
+                        "第二次要重新结合当前暗涌、激素和事件判断，不能只因为第一次没有安排就直接skip。"
                         "required_follow_up=true 表示服务端已经确认事件仍有自然后续节点，"
                         "并且当前激素状态足以形成真实的惦记。除非后续事件明确写了对方已经回来、"
                         "到达或事情已经结束，否则不能仅以‘事件自然结束’为理由skip；应选择message，"

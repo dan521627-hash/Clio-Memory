@@ -186,7 +186,7 @@ xinchao:
   memory_resonance_max_items: 3
   memory_resonance_mailbox_enabled: true
   presence_nudge_after_minutes: 30  # pulse_boot 后无 MCP 活动时的首次沉默提醒
-  silence_to_absence_minutes: 60  # 前 60 分钟只算沉默；满 60 分钟才进入静默并生成暗涌
+  silence_to_absence_minutes: 30  # 连续30分钟无写入/调用后进入静默，再按暗涌阶段计时
   drowsy_after_hours: 4
   sleep_after_hours: 7
   settle_interval_seconds: 60
@@ -207,6 +207,16 @@ xinchao:
   judge_config_path: ""          # Optional private judge JSON, e.g. /data/private/hormone-judge.json
   relation_graph_path: ""        # Legacy relationship-only JSON; judge_config_path takes priority
   half_life_hours:
+    想靠近: 8.0
+    想黏着: 8.0
+    肌肤饥渴: 6.0
+    性欲: 6.0
+    想知道她在干嘛: 6.0
+    想分享: 8.0
+    好奇: 6.0
+    闲: 4.0
+    社交: 8.0
+    责任: 12.0
     生气: 0.75
     醋: 2.0
     难过: 4.0
@@ -243,6 +253,7 @@ behavior:
   maximum_delay_minutes: 480
   presence_retry_minutes: 15
   follow_up_hormone_threshold: 0.10
+  schedule_recheck_hormone_threshold: 0.35  # 高情绪事件即使首次保守，也保留一次到点复核
   burst_hormone_threshold: 0.75     # Strong emotion may produce 2-3 short pushes
   dedupe_threshold: 0.72            # Regenerate once when close to the last 8 pushes
   max_messages: 3

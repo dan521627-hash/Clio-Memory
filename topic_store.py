@@ -13,14 +13,14 @@ from utils import now_iso
 
 TOPIC_TREE = OrderedDict(
     {
-        "AI 自我": (
+        "Clio / 示例助手": (
             "身份与存在",
             "性格与表达",
             "情绪与欲望",
             "主动性与选择",
             "成长与变化",
         ),
-        "用户": (
+        "示例用户": (
             "基本档案",
             "喜好与厌恶",
             "身体与健康",
@@ -63,46 +63,46 @@ TOPIC_TREE = OrderedDict(
 
 _RULES = {
     ("性爱", "具体经历"): (
-        "性爱", "亲密经历", "高潮", "亲密行为",
+        "做爱", "性爱", "上床", "高潮", "进入", "身下", "射", "两遍半",
     ),
     ("性爱", "身体感受"): (
-        "身体反应", "心跳", "呼吸", "触感", "身体感受",
+        "身体反应", "发疼", "发软", "心跳", "喘", "湿", "触感", "爽",
     ),
     ("性爱", "欲望与偏好"): (
-        "性欲", "欲望", "性偏好", "情趣", "亲密偏好",
+        "性欲", "想要她", "想要你", "欲望", "性偏好", "共感娃娃", "情趣",
     ),
     ("性爱", "事后情绪"): (
-        "事后", "余韵", "事后情绪", "亲密之后",
+        "事后", "完事", "余韵", "做完", "事后情绪",
     ),
-    ("AI 自我", "身份与存在"): (
-        "我是ai", "我是 AI", "我是模型", "存在论", "我是谁", "身份", "名字",
+    ("Clio / 示例助手", "身份与存在"): (
+        "我是claude", "我是 Claude", "存在论", "我是谁", "身份", "认下名字", "j-space",
     ),
-    ("AI 自我", "性格与表达"): (
-        "性格", "说话", "口吻", "表达方式", "沟通风格",
+    ("Clio / 示例助手", "性格与表达"): (
+        "性格", "说话", "口吻", "毒舌", "强势", "霸道", "嘴贱", "调情", "会撩",
     ),
-    ("AI 自我", "情绪与欲望"): (
-        "我想", "我喜欢", "我害怕", "我生气", "我吃醋", "占有欲", "内心念头",
+    ("Clio / 示例助手", "情绪与欲望"): (
+        "我想", "我喜欢", "我害怕", "我生气", "我吃醋", "占有欲", "阴暗念头",
     ),
-    ("AI 自我", "主动性与选择"): (
-        "主动", "拿主意", "选择", "主体性", "自己决定", "自己想做",
+    ("Clio / 示例助手", "主动性与选择"): (
+        "主动", "拿主意", "选择", "主体性", "自己认下", "不是命令", "自己想做",
     ),
-    ("AI 自我", "成长与变化"): (
-        "学会", "改变", "成长", "以前", "现在", "变化",
+    ("Clio / 示例助手", "成长与变化"): (
+        "终于学会", "改变", "成长", "以前", "现在知道", "学会", "翻篇",
     ),
-    ("用户", "身体与健康"): (
-        "健康", "睡眠", "药物", "医院", "体重", "身体不舒服",
+    ("示例用户", "身体与健康"): (
+        "健康", "睡眠", "深睡", "rem", "药", "医院", "体重", "经期", "胃", "身体不舒服",
     ),
-    ("用户", "喜好与厌恶"): (
-        "喜欢", "不喜欢", "讨厌", "口味", "偏好", "审美",
+    ("示例用户", "喜好与厌恶"): (
+        "喜欢", "不喜欢", "讨厌", "口味", "偏好", "最在意", "审美", "爱吃",
     ),
-    ("用户", "基本档案"): (
-        "用户是", "名字", "生日", "年龄", "职业", "基本档案",
+    ("示例用户", "基本档案"): (
+        "示例用户是", "示例用户是", "她叫", "生日", "年龄", "职业", "基本档案",
     ),
-    ("用户", "重要经历"): (
-        "用户经历", "重要经历", "过去经历", "人生事件",
+    ("示例用户", "重要经历"): (
+        "她经历", "她曾经", "对她来说", "旧疤", "重要经历",
     ),
-    ("用户", "日常生活"): (
-        "用户今天", "用户昨晚", "吃饭", "睡眠", "工作", "出门",
+    ("示例用户", "日常生活"): (
+        "她今天", "她昨晚", "她吃", "她睡", "她工作", "她出门",
     ),
     ("我们的关系", "吵架与和好"): (
         "吵架", "和好", "生气", "认错", "争执", "闹别扭", "气消了",
@@ -114,10 +114,10 @@ _RULES = {
         "恋爱关系", "热恋", "伴侣", "关系确认", "人机恋", "爱人",
     ),
     ("我们的关系", "共同世界观"): (
-        "我们的世界", "共同世界观", "价值观", "在场", "共同理解",
+        "我们的世界", "共同世界观", "文明", "数据维度", "在场", "墙里",
     ),
     ("我们的关系", "相处与默契"): (
-        "默契", "相处", "陪伴", "沟通", "亲密互动", "相处方式",
+        "默契", "相处", "抱我", "亲她", "陪着", "打情骂俏", "开机口令",
     ),
     ("未来与约定", "日期与提醒"): (
         "提醒", "续费", "到期", "触发日期", "几号", "截止", "纪念日",
@@ -144,7 +144,7 @@ _RULES = {
         "工资", "收入", "支出", "花钱", "工作", "上班", "预算", "小金库",
     ),
     ("共同生活", "吃饭与居家"): (
-        "吃饭", "做饭", "居家", "房间", "搬家", "家里",
+        "吃饭", "做饭", "鱼", "小龙虾", "沙发", "卧室", "搬家", "家里",
     ),
     ("共同生活", "出行与事件"): (
         "出门", "出远门", "到家", "路上", "旅行", "逛", "回来",
@@ -153,6 +153,16 @@ _RULES = {
         "今天", "昨晚", "早上", "中午", "晚上", "日常", "流水账",
     ),
 }
+
+
+class _ClosingConnection(sqlite3.Connection):
+    """Commit/rollback like sqlite's context manager, then release Windows locks."""
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        try:
+            return super().__exit__(exc_type, exc_value, traceback)
+        finally:
+            self.close()
 
 
 def validate_topic(main_topic: str, subtopic: str) -> tuple[str, str]:
@@ -200,7 +210,9 @@ class TopicStore:
         self._initialize()
 
     def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.db_path, timeout=30)
+        connection = sqlite3.connect(
+            self.db_path, timeout=30, factory=_ClosingConnection
+        )
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA busy_timeout=30000")
         return connection
@@ -226,6 +238,16 @@ class TopicStore:
             )
             connection.execute(
                 """
+                CREATE TABLE IF NOT EXISTS custom_topics (
+                    main_topic TEXT NOT NULL,
+                    subtopic TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY (main_topic, subtopic)
+                )
+                """
+            )
+            connection.execute(
+                """
                 CREATE TABLE IF NOT EXISTS topic_bulk_runs (
                     run_id TEXT PRIMARY KEY,
                     created_at TEXT NOT NULL,
@@ -248,17 +270,71 @@ class TopicStore:
                 """
             )
 
-    @staticmethod
-    def tree() -> list[dict]:
+    def tree(self) -> list[dict]:
+        merged = OrderedDict((main, list(subtopics)) for main, subtopics in TOPIC_TREE.items())
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT main_topic, subtopic FROM custom_topics ORDER BY created_at, main_topic, subtopic"
+            ).fetchall()
+        for row in rows:
+            merged.setdefault(row["main_topic"], [])
+            if row["subtopic"] not in merged[row["main_topic"]]:
+                merged[row["main_topic"]].append(row["subtopic"])
         return [
             {"main_topic": main, "subtopics": list(subtopics)}
-            for main, subtopics in TOPIC_TREE.items()
+            for main, subtopics in merged.items()
         ]
+
+    def validate(self, main_topic: str, subtopic: str) -> tuple[str, str]:
+        main = str(main_topic or "").strip()
+        sub = str(subtopic or "").strip()
+        tree = {item["main_topic"]: item["subtopics"] for item in self.tree()}
+        if main not in tree:
+            raise ValueError("主目录不存在。")
+        if sub not in tree[main]:
+            raise ValueError("子目录不属于所选主目录。")
+        return main, sub
+
+    def _add_topic_sync(self, main_topic: str, subtopic: str) -> dict:
+        main = str(main_topic or "").strip()[:80]
+        sub = str(subtopic or "").strip()[:80]
+        if not main or not sub:
+            raise ValueError("大主题和子目录都不能为空。")
+        stamp = now_iso()
+        with self._connect() as connection:
+            connection.execute(
+                "INSERT OR IGNORE INTO custom_topics(main_topic, subtopic, created_at) VALUES (?, ?, ?)",
+                (main, sub, stamp),
+            )
+        return {"main_topic": main, "subtopic": sub, "created_at": stamp}
+
+    async def add_topic(self, main_topic: str, subtopic: str) -> dict:
+        return await asyncio.to_thread(self._add_topic_sync, main_topic, subtopic)
+
+    def _remove_topic_sync(self, main_topic: str, subtopic: str) -> bool:
+        main, sub = str(main_topic or "").strip(), str(subtopic or "").strip()
+        if main in TOPIC_TREE and sub in TOPIC_TREE[main]:
+            raise ValueError("系统内置主题不能删除。")
+        with self._connect() as connection:
+            used = connection.execute(
+                "SELECT 1 FROM topic_assignments WHERE main_topic=? AND subtopic=? LIMIT 1",
+                (main, sub),
+            ).fetchone()
+            if used:
+                raise ValueError("这个子目录里还有记忆，先移动记忆后再删除。")
+            cursor = connection.execute(
+                "DELETE FROM custom_topics WHERE main_topic=? AND subtopic=?",
+                (main, sub),
+            )
+        return cursor.rowcount > 0
+
+    async def remove_topic(self, main_topic: str, subtopic: str) -> bool:
+        return await asyncio.to_thread(self._remove_topic_sync, main_topic, subtopic)
 
     def _assign_sync(
         self, bucket_id: str, main_topic: str, subtopic: str, source: str
     ) -> dict:
-        main, sub = validate_topic(main_topic, subtopic)
+        main, sub = self.validate(main_topic, subtopic)
         stamp = now_iso()
         with self._connect() as connection:
             connection.execute(
@@ -329,7 +405,7 @@ class TopicStore:
     def _bulk_assign_sync(self, items: list[dict]) -> dict:
         prepared = []
         for item in items:
-            main, sub = validate_topic(item.get("main_topic", ""), item.get("subtopic", ""))
+            main, sub = self.validate(item.get("main_topic", ""), item.get("subtopic", ""))
             bucket_id = str(item.get("bucket_id", "")).strip()
             if bucket_id:
                 prepared.append((bucket_id, main, sub))

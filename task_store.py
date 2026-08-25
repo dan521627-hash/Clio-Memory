@@ -433,6 +433,103 @@ class TaskStore:
     async def history(self, task_id: int, limit: int = 50) -> list[dict]:
         return await asyncio.to_thread(self._history_sync, task_id, limit)
 
+    def _retract_source_sync(self, source_type: str, source_ref: str) -> dict:
+        """Undo safe automatic task effects from a corrected source write.
+
+        Manually edited tasks are never rolled back.  An automatically-created
+        task is hidden only when the corrected write was its sole provenance.
+        For an automatic status update, restore the latest snapshot only when
+        no later manual edit exists and the source is still the latest change.
+        """
+        source_kind = str(source_type or "").strip()[:40]
+        source_reference = str(source_ref or "").strip()[:160]
+        result = {"sources_removed": 0, "tasks_retracted": [], "tasks_restored": [], "protected": []}
+        if not source_kind:
+            return result
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            sources = connection.execute(
+                """
+                SELECT * FROM task_sources
+                WHERE source_type=? AND source_ref=?
+                ORDER BY source_id DESC
+                """,
+                (source_kind, source_reference),
+            ).fetchall()
+            task_ids = sorted({int(row["task_id"]) for row in sources})
+            latest_source_at = {
+                int(task_id): max(
+                    str(row["created_at"])
+                    for row in sources if int(row["task_id"]) == int(task_id)
+                )
+                for task_id in task_ids
+            }
+            connection.execute(
+                "DELETE FROM task_sources WHERE source_type=? AND source_ref=?",
+                (source_kind, source_reference),
+            )
+            result["sources_removed"] = len(sources)
+            stamp = now_iso()
+            for task_id in task_ids:
+                task = connection.execute(
+                    "SELECT * FROM tasks WHERE task_id=? AND deleted_at IS NULL",
+                    (task_id,),
+                ).fetchone()
+                if not task:
+                    continue
+                remaining = int(connection.execute(
+                    "SELECT COUNT(*) FROM task_sources WHERE task_id=?", (task_id,)
+                ).fetchone()[0])
+                if task["manual_updated_at"]:
+                    result["protected"].append(task_id)
+                    continue
+                if str(task["created_by"] or "") == "auto" and remaining == 0:
+                    self._snapshot(connection, task, "source_correction_retract")
+                    connection.execute(
+                        "UPDATE tasks SET deleted_at=?, updated_at=? WHERE task_id=?",
+                        (stamp, stamp, task_id),
+                    )
+                    result["tasks_retracted"].append(task_id)
+                    continue
+                history = connection.execute(
+                    """
+                    SELECT * FROM task_history
+                    WHERE task_id=? AND operation='auto_update'
+                    ORDER BY history_id DESC LIMIT 1
+                    """,
+                    (task_id,),
+                ).fetchone()
+                if (
+                    history
+                    and str(task["updated_at"] or "") <= latest_source_at[task_id]
+                ):
+                    self._snapshot(connection, task, "source_correction_restore")
+                    connection.execute(
+                        """
+                        UPDATE tasks SET title=?, details=?, status=?, importance=?,
+                            updated_at=?, completed_at=?, completion_notice_pending=0
+                        WHERE task_id=?
+                        """,
+                        (
+                            history["title"], history["details"], history["status"],
+                            history["importance"], stamp, history["completed_at"], task_id,
+                        ),
+                    )
+                    result["tasks_restored"].append(task_id)
+            connection.execute(
+                """
+                UPDATE task_events SET status='superseded', updated_at=?
+                WHERE source_type=? AND source_ref=? AND status IN ('applied','pending')
+                """,
+                (stamp, source_kind, source_reference),
+            )
+        return result
+
+    async def retract_source(self, source_type: str, source_ref: str) -> dict:
+        return await asyncio.to_thread(
+            self._retract_source_sync, source_type, source_ref
+        )
+
     def _count_sync(self) -> dict:
         with self._connect() as connection:
             rows = connection.execute(

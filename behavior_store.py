@@ -551,6 +551,78 @@ class BehaviorStore:
         """Drop obsolete scheduling material after a push acknowledgement."""
         return await asyncio.to_thread(self._purge_cycle_candidates_sync, cycle_ids)
 
+    def _cancel_obsolete_sync(self, current_cycle_id: int) -> dict:
+        """Cancel unsent follow-up material when a new write starts a round."""
+        stamp = now_iso()
+        with self._connect() as connection:
+            candidate_cursor = connection.execute(
+                """
+                UPDATE behavior_candidates SET status='cancelled',
+                    decision_note='新写入开始，上一轮候场取消', updated_at=?
+                WHERE status IN ('pending', 'waiting')
+                """,
+                (stamp,),
+            )
+            action_cursor = connection.execute(
+                """
+                UPDATE behavior_actions SET status='cancelled',
+                    content='', error='新写入开始，上一轮未发送内容取消',
+                    handoff_status='cancelled'
+                WHERE status IN ('rehearsal', 'held')
+                  AND handoff_status IN ('none', 'legacy')
+                """
+            )
+        return {
+            "candidates": int(candidate_cursor.rowcount),
+            "actions": int(action_cursor.rowcount),
+            "cycle_id": int(current_cycle_id or 0),
+        }
+
+    async def cancel_obsolete(self, current_cycle_id: int) -> dict:
+        """Cancel only unsent follow-up material; delivered pushes stay intact."""
+        return await asyncio.to_thread(self._cancel_obsolete_sync, current_cycle_id)
+
+    def _cancel_for_activity_sync(self, current_cycle_id: int) -> dict:
+        """End every unfinished silence output after a real AI action."""
+        stamp = now_iso()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            candidate_cursor = connection.execute(
+                """
+                UPDATE behavior_candidates SET status='cancelled',
+                    decision_note='检测到新的 AI 活动，旧沉默候场取消', updated_at=?
+                WHERE status IN ('pending', 'waiting')
+                """,
+                (stamp,),
+            )
+            unsent_cursor = connection.execute(
+                """
+                UPDATE behavior_actions SET status='cancelled', content='',
+                    error='检测到新的 AI 活动，旧沉默内容取消',
+                    handoff_status='cancelled'
+                WHERE status IN ('rehearsal', 'held')
+                  AND handoff_status IN ('none', 'legacy', 'pending')
+                """
+            )
+            handoff_cursor = connection.execute(
+                """
+                UPDATE behavior_actions SET handoff_status='cancelled'
+                WHERE status='sent' AND handoff_status='pending'
+                """
+            )
+        return {
+            "candidates": int(candidate_cursor.rowcount),
+            "unsent_actions": int(unsent_cursor.rowcount),
+            "pending_handoffs": int(handoff_cursor.rowcount),
+            "cycle_id": int(current_cycle_id or 0),
+        }
+
+    async def cancel_for_activity(self, current_cycle_id: int) -> dict:
+        """Cancel queued output and stop sent pushes from entering the next handoff."""
+        return await asyncio.to_thread(
+            self._cancel_for_activity_sync, current_cycle_id
+        )
+
     @staticmethod
     def _decode_candidate(row) -> dict | None:
         if not row:
@@ -660,6 +732,23 @@ class BehaviorStore:
     ) -> dict | None:
         return await asyncio.to_thread(
             self._update_candidate_sync, candidate_id, status, note, due_at
+        )
+
+    def _cancel_source_event_sync(self, source_event_id: int) -> int:
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE behavior_candidates SET status='cancelled',
+                    decision_note='来源写入已被修正，旧候场已撤回', updated_at=?
+                WHERE source_event_id=? AND status IN ('pending', 'waiting')
+                """,
+                (now_iso(), int(source_event_id)),
+            )
+        return int(cursor.rowcount)
+
+    async def cancel_source_event(self, source_event_id: int) -> int:
+        return await asyncio.to_thread(
+            self._cancel_source_event_sync, source_event_id
         )
 
     def _cancel_cycle_sync(self, cycle_id: int, except_id: int = 0) -> int:

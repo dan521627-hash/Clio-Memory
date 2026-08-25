@@ -70,7 +70,7 @@ class PulseBootTests(unittest.IsolatedAsyncioTestCase):
 
         for tool_name in expected_tools:
             self.assertIn(tool_name, server.PULSE_BOOT_TOOL_GUIDE)
-        self.assertIn("不要一次读取全库", server.PULSE_BOOT_TOOL_GUIDE)
+        self.assertNotIn("不要一次读取全库", server.PULSE_BOOT_TOOL_GUIDE)
 
     def test_hormone_summary_hides_internal_timestamps(self):
         text = "离开计时起点（UTC+8）：2026-08-09 08:00\n想靠近：0.72\n状态时间（UTC+8）：2026-08-09 09:00"
@@ -313,7 +313,7 @@ class PulseBootTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("只应交付一次的暗涌", first)
         self.assertNotIn("【暗涌】", second)
         self.assertIn("=== Clio 开机记忆 ===", second)
-        self.assertIn("【按需入口】", second)
+        self.assertIn("【工具】", second)
         mark.assert_awaited_once_with(88)
         self.assertEqual(manager.list_all.await_count, 2)
 
@@ -685,7 +685,7 @@ class PulseBootTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("没有新的 Bark", result)
         self.assertNotIn("【AI小金库】", result)
         self.assertNotIn("尚未设置开机核心记忆", result)
-        self.assertIn("【按需入口】", result)
+        self.assertIn("【工具】", result)
 
     async def test_core_pins_use_sort_order_instead_of_bucket_id(self):
         buckets = [
@@ -819,7 +819,7 @@ class PulseBootTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("not-todo", result)
         self.assertNotIn("resolved", result)
         self.assertNotIn("【感受写入提醒】", result)
-        self.assertTrue(result.endswith("\nseal: test-seal"))
+        self.assertNotIn("seal:", result)
         self.assertEqual(dehydrator.calls, [])
 
     async def test_all_core_pins_are_listed_even_when_legacy_fixed_ids_are_shorter(self):
@@ -903,7 +903,7 @@ class PulseBootTests(unittest.IsolatedAsyncioTestCase):
 
         manager.list_all.assert_awaited_once_with(include_archive=True)
         self.assertNotIn("【感受写入提醒】", result)
-        self.assertTrue(result.endswith("\nseal: test-seal"))
+        self.assertNotIn("seal:", result)
 
     async def test_sealed_bucket_leaves_no_trace(self):
         with tempfile.TemporaryDirectory() as root:

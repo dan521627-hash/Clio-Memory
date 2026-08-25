@@ -122,6 +122,25 @@ class CalendarViewTests(unittest.TestCase):
         )
         self.assertEqual(day["items"], [])
 
+    def test_private_thought_trace_is_on_date_timeline_but_read_only(self):
+        day = build_calendar_day(
+            self.target,
+            thoughts=[
+                {
+                    "canonical_tag": "trace:靠近",
+                    "thought_kind": "trace",
+                    "thought_text": "我想把这句话只留在这里。",
+                    "status": "flash",
+                    "first_seen": "2026-08-11T15:00:00+08:00",
+                    "last_seen": "2026-08-11T15:00:00+08:00",
+                }
+            ],
+        )
+        self.assertEqual(day["count"], 1)
+        self.assertEqual(day["items"][0]["kind"], "thought_trace")
+        self.assertEqual(day["items"][0]["title"], "念痕")
+        self.assertTrue(day["items"][0]["read_only"])
+
     def test_ai_defaults_can_hide_archived_and_sealed_buckets(self):
         buckets = [
             {

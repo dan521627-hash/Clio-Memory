@@ -1,4 +1,4 @@
-"""Unified LMC-5 coordinate snapshots stored outside Markdown buckets."""
+"""Unified mind-lattice snapshots stored outside Markdown buckets."""
 
 from __future__ import annotations
 

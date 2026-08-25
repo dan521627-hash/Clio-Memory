@@ -13,6 +13,7 @@ KIND_LABELS = {
     "memory_trigger": "前瞻提醒",
     "mailbox": "信箱",
     "thought": "心念",
+    "thought_trace": "念痕",
     "darkflow": "暗涌",
     "behavior": "静默表达",
     "task": "未竟事项",
@@ -184,13 +185,22 @@ def build_calendar_day(
             item.get("first_seen") or item.get("last_seen") or item.get("updated_at"),
         )
         if _on_date(timestamp, target):
+            thought_kind = (
+                "thought_trace" if item.get("thought_kind") == "trace" else "thought"
+            )
             entries.append(
                 {
-                    "kind": "thought",
+                    "kind": thought_kind,
                     "id": key,
-                    "title": "一闪而过" if item.get("status") == "flash" else "反复萦绕",
+                    "title": (
+                        "念痕"
+                        if thought_kind == "thought_trace"
+                        else "一闪而过" if item.get("status") == "flash" else "反复萦绕"
+                    ),
                     "time": _calendar_time(timestamp),
                     "note": _summary(item.get("thought_text") or item.get("event_tag"), 160),
+                    "private": True,
+                    "read_only": thought_kind == "thought_trace",
                 }
             )
 

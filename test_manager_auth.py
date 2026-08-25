@@ -82,7 +82,7 @@ class ManagerAuthenticationTests(unittest.TestCase):
         settle.assert_awaited_once()
         purge_candidates.assert_awaited_once_with([8])
 
-    def test_legacy_silence_ack_deletes_plain_nudge_without_restarting_timer(self):
+    def test_silence_ack_cancels_old_cycle_and_starts_active_presence(self):
         self.client.post(
             "/api/auth/login", json={"password": "test-mobile-password"}
         )
@@ -98,10 +98,14 @@ class ManagerAuthenticationTests(unittest.TestCase):
                 "acknowledged_at": "2026-08-11T20:00:00+08:00",
             }
         )
-        restart = AsyncMock(
-            return_value={"silence_started_at": "2026-08-11T20:00:00+08:00"}
+        observe = AsyncMock(
+            return_value={
+                "previous_cycle_id": 12,
+                "cycle_id": 13,
+                "active_started_at": "2026-08-11T20:00:00+08:00",
+            }
         )
-        settle = AsyncMock()
+        cancel = AsyncMock(return_value=1)
         purge = AsyncMock(return_value=1)
         with (
             patch.object(
@@ -116,13 +120,13 @@ class ManagerAuthenticationTests(unittest.TestCase):
             ),
             patch.object(
                 manager_server.xinchao_service,
-                "restart_silence_timer",
-                new=restart,
+                "observe_presence",
+                new=observe,
             ),
             patch.object(
-                manager_server.xinchao_service,
-                "acknowledge_seen",
-                new=settle,
+                manager_server.behavior_service.store,
+                "cancel_for_activity",
+                new=cancel,
             ),
         ):
             response = self.client.post(
@@ -130,10 +134,11 @@ class ManagerAuthenticationTests(unittest.TestCase):
             )
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["phase"], "legacy_silence")
+        self.assertEqual(response.json()["phase"], "silence")
         acknowledge.assert_awaited_once_with(44)
-        restart.assert_not_awaited()
-        settle.assert_not_awaited()
+        observe.assert_awaited_once()
+        self.assertTrue(observe.await_args.kwargs["interrupt_silence"])
+        cancel.assert_awaited_once_with(12)
         purge.assert_awaited_once_with([44])
 
     def test_calendar_endpoint_uses_all_read_only_sources(self):
@@ -218,6 +223,75 @@ class ManagerAuthenticationTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["candidate_count"], 1)
         self.assertEqual(response.json()["candidates"][0]["candidate_id"], 7)
+
+    def test_timeline_correction_reuses_one_reversible_effect_key(self):
+        self.client.post(
+            "/api/auth/login", json={"password": "test-mobile-password"}
+        )
+        record = AsyncMock(
+            return_value={
+                "status": "updated",
+                "fact_key": "current_city",
+                "version_id": 12,
+            }
+        )
+        sidecar = AsyncMock(return_value={"status": "applied"})
+        with (
+            patch.object(manager_server.fact_timeline_store, "record", new=record),
+            patch.object(manager_server, "_record_xinchao", new=sidecar),
+        ):
+            response = self.client.post(
+                "/api/timeline",
+                json={
+                    "fact": "当前城市",
+                    "value": "已经抵达北京",
+                    "effective_date": "2026-08-23",
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        sidecar.assert_awaited_once()
+        self.assertEqual(
+            sidecar.await_args.kwargs["correction_key"], "timeline:current_city"
+        )
+
+    def test_timeline_api_survives_null_bucket_metadata(self):
+        self.client.post(
+            "/api/auth/login", json={"password": "test-mobile-password"}
+        )
+        list_facts = AsyncMock(
+            return_value=[
+                {
+                    "fact_key": "current_city",
+                    "fact_label": "当前城市",
+                    "versions": [
+                        {
+                            "source_type": "bucket",
+                            "source_bucket_id": "legacy-bucket",
+                            "is_current": True,
+                            "fact_value": "测试城市",
+                        }
+                    ],
+                }
+            ]
+        )
+        candidates = AsyncMock(return_value=[])
+        bucket_get = AsyncMock(return_value={"metadata": None})
+        with (
+            patch.object(
+                manager_server.fact_timeline_store, "list_facts", new=list_facts
+            ),
+            patch.object(
+                manager_server.fact_timeline_store,
+                "list_candidates",
+                new=candidates,
+            ),
+            patch.object(manager_server.bucket_manager, "get", new=bucket_get),
+        ):
+            response = self.client.get("/api/timeline")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["count"], 1)
 
 
 if __name__ == "__main__":

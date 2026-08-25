@@ -8,10 +8,12 @@ import json
 import logging
 import os
 import re
+import secrets
 import sqlite3
 import tempfile
 import time
 import zipfile
+from datetime import datetime
 from pathlib import Path
 from typing import Literal
 
@@ -22,12 +24,14 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from bucket_manager import BucketManager
+from brain_context_service import build_brain_context
 from behavior_service import BehaviorService
 from calendar_view import build_calendar_day
 from fact_timeline_service import FactTimelineService
 from fact_timeline_store import FactTimelineStore
 from mailbox_store import MailboxStore
 from mailbox_search import search_mailbox
+from living_memory import LivingMemoryStore
 from memory_segments import (
     append_memory_segment,
     package_single_insertion,
@@ -44,7 +48,7 @@ from utils import beijing_now, load_config, normalize_beijing_timestamp, now_iso
 from vault_health import VaultHealthCheck
 from xinchao_store import XinchaoService
 from xinchao_engine import PIPE_NAMES
-from xinchao_evaluator import EVALUATOR_PROMPT
+from xinchao_evaluator import EVALUATOR_PROMPT, PIPE_GUIDE
 
 
 config = load_config()
@@ -53,6 +57,7 @@ relation_store = RelationStore(config)
 mailbox_store = MailboxStore(config)
 treasury_store = TreasuryStore(config)
 xinchao_service = XinchaoService(config)
+xinchao_service.set_thought_embedding_provider(bucket_manager.embedding_index)
 behavior_service = BehaviorService(config, xinchao_service.evaluator)
 task_service = TaskService(config, xinchao_service.evaluator, bucket_manager.embedding_index)
 fact_timeline_store = FactTimelineStore(config)
@@ -60,6 +65,7 @@ fact_timeline_service = FactTimelineService(
     config, xinchao_service.evaluator, fact_timeline_store, bucket_manager
 )
 topic_store = TopicStore(config)
+living_memory_store = LivingMemoryStore(config)
 permanent_delete_service = PermanentDeleteService(config)
 logger = logging.getLogger("ombre_brain.manager")
 topic_preview_cache: dict[str, dict] = {}
@@ -193,6 +199,12 @@ class ManagerLogin(BaseModel):
     password: str = Field(min_length=1, max_length=256)
 
 
+class ManagerPasswordChange(BaseModel):
+    current_password: str = Field(min_length=1, max_length=256)
+    new_password: str = Field(min_length=8, max_length=256)
+    confirm_password: str = Field(min_length=8, max_length=256)
+
+
 app = FastAPI(
     title="Clio Manager",
     docs_url=None,
@@ -210,13 +222,67 @@ if manager_password.upper() in {
     logger.error("CLIO_MANAGER_PASSWORD is still a documented example value")
     manager_password = ""
 login_failures: dict[str, list[float]] = {}
+manager_auth_path = data_root / ".clio-manager-auth.json"
+
+
+def _read_manager_auth() -> dict:
+    try:
+        payload = json.loads(manager_auth_path.read_text(encoding="utf-8"))
+        if payload.get("salt") and payload.get("password_hash") and payload.get("session_secret"):
+            return payload
+    except (FileNotFoundError, OSError, ValueError, TypeError):
+        pass
+    return {}
+
+
+def _password_hash(password: str, salt: str) -> str:
+    return hashlib.pbkdf2_hmac(
+        "sha256", password.encode("utf-8"), bytes.fromhex(salt), 260_000
+    ).hex()
+
+
+def _password_configured() -> bool:
+    return bool(_read_manager_auth() or manager_password)
+
+
+def _password_matches(password: str) -> bool:
+    auth = _read_manager_auth()
+    if auth:
+        supplied = _password_hash(password, str(auth["salt"]))
+        return hmac.compare_digest(supplied, str(auth["password_hash"]))
+    return bool(manager_password and hmac.compare_digest(password, manager_password))
+
+
+def _save_manager_password(password: str) -> dict:
+    salt = secrets.token_hex(16)
+    payload = {
+        "version": 1,
+        "salt": salt,
+        "password_hash": _password_hash(password, salt),
+        "session_secret": secrets.token_hex(32),
+        "updated_at": now_iso(),
+    }
+    manager_auth_path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+        "w", encoding="utf-8", dir=manager_auth_path.parent, delete=False
+    ) as handle:
+        json.dump(payload, handle, ensure_ascii=False)
+        temporary_path = Path(handle.name)
+    os.replace(temporary_path, manager_auth_path)
+    try:
+        os.chmod(manager_auth_path, 0o600)
+    except OSError:
+        pass
+    return payload
 
 
 def _manager_session_token() -> str:
-    if not manager_password:
+    auth = _read_manager_auth()
+    secret = str(auth.get("session_secret") or manager_password)
+    if not secret:
         return ""
     return hmac.new(
-        manager_password.encode("utf-8"),
+        secret.encode("utf-8"),
         b"clio-manager-session-v1",
         hashlib.sha256,
     ).hexdigest()
@@ -240,38 +306,65 @@ def _login_client_ip(request: Request) -> str:
 async def require_manager_login(request: Request, call_next):
     path = request.url.path
     if path.startswith("/api/") and not path.startswith("/api/auth/"):
-        if not manager_password:
+        if not _password_configured():
             return JSONResponse(
                 {"detail": "管理页尚未配置登录密码。"}, status_code=503
             )
         if not _manager_authenticated(request):
             return JSONResponse({"detail": "请先登录管理页。"}, status_code=401)
-    return await call_next(request)
+    response = await call_next(request)
+    if path in {"/", "/index.html", "/manage", "/manage/", "/manage/index.html"}:
+        response.headers["Cache-Control"] = "no-store, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+    return response
 
 
 @app.get("/api/auth/status")
 async def manager_auth_status(request: Request) -> dict:
     return {
-        "configured": bool(manager_password),
+        "configured": _password_configured(),
         "authenticated": _manager_authenticated(request),
     }
 
 
 @app.post("/api/auth/login")
 async def manager_login(request: Request, payload: ManagerLogin):
-    if not manager_password:
+    if not _password_configured():
         raise HTTPException(status_code=503, detail="管理页尚未配置登录密码。")
     client_ip = _login_client_ip(request)
     now = time.monotonic()
     attempts = [item for item in login_failures.get(client_ip, []) if now - item < 900]
     if len(attempts) >= 5:
         raise HTTPException(status_code=429, detail="尝试次数过多，请十五分钟后再试。")
-    if not hmac.compare_digest(payload.password, manager_password):
+    if not _password_matches(payload.password):
         attempts.append(now)
         login_failures[client_ip] = attempts
         raise HTTPException(status_code=401, detail="密码不正确。")
     login_failures.pop(client_ip, None)
     response = JSONResponse({"ok": True})
+    forwarded_scheme = request.headers.get("x-forwarded-proto", request.url.scheme)
+    response.set_cookie(
+        MANAGER_COOKIE,
+        _manager_session_token(),
+        max_age=60 * 60 * 24 * 30,
+        httponly=True,
+        secure=forwarded_scheme == "https",
+        samesite="strict",
+        path="/",
+    )
+    return response
+
+
+@app.post("/api/auth/change-password")
+async def manager_change_password(request: Request, payload: ManagerPasswordChange):
+    if not _manager_authenticated(request):
+        raise HTTPException(status_code=401, detail="请先登录管理页。")
+    if not _password_matches(payload.current_password):
+        raise HTTPException(status_code=400, detail="当前密码不正确。")
+    if payload.new_password != payload.confirm_password:
+        raise HTTPException(status_code=400, detail="两次输入的新密码不一致。")
+    _save_manager_password(payload.new_password)
+    response = JSONResponse({"ok": True, "updated_at": now_iso()})
     forwarded_scheme = request.headers.get("x-forwarded-proto", request.url.scheme)
     response.set_cookie(
         MANAGER_COOKIE,
@@ -292,20 +385,64 @@ async def manager_logout():
     return response
 
 
-async def _record_xinchao(content: str, source_tool: str, source_ref: str) -> None:
+async def _record_xinchao(
+    content: str,
+    source_tool: str,
+    source_ref: str,
+    *,
+    correction_key: str = "",
+) -> dict:
     try:
-        result = await xinchao_service.record_event(content, source_tool, source_ref)
-        if result.get("status") == "applied":
+        result = await xinchao_service.record_event(
+            content,
+            source_tool,
+            source_ref,
+            correction_key=correction_key,
+        )
+        if isinstance(result, dict) and result.get("status") in {"pending", "applied"}:
             state = await xinchao_service.status()
+            await behavior_service.store.cancel_for_activity(state.get("cycle_id", 0))
+            superseded = result.get("superseded") or {}
+            if superseded.get("previous_cycle_id") is not None:
+                await behavior_service.store.cancel_for_activity(
+                    int(superseded.get("previous_cycle_id") or 0)
+                )
+        if result.get("status") == "applied":
+            correction = result.get("correction") or {}
+            if correction.get("supersedes_event_id"):
+                await behavior_service.store.cancel_source_event(
+                    int(correction["supersedes_event_id"])
+                )
             await behavior_service.schedule_event(result, state)
+        return result
     except Exception as error:
         logger.warning("Manager Xinchao hook failed after successful write: %s", error)
+        return {"status": "pending", "error": str(error)}
 
 
-async def _record_sidecars(content: str, source_tool: str, source_ref: str) -> None:
+async def _record_sidecars(
+    content: str,
+    source_tool: str,
+    source_ref: str,
+    *,
+    correction_key: str = "",
+) -> None:
     event_key = hashlib.sha256(
         f"{source_tool}\0{source_ref}\0{' '.join(content.split())}".encode("utf-8")
     ).hexdigest()
+    xinchao_result = await _record_xinchao(
+        content, source_tool, source_ref, correction_key=correction_key
+    )
+    correction = xinchao_result.get("correction") or {}
+    if correction.get("supersedes_event_id"):
+        try:
+            await behavior_service.store.cancel_source_event(
+                int(correction["supersedes_event_id"])
+            )
+            await task_service.retract_source(source_tool, source_ref)
+            await fact_timeline_service.retract_source(source_tool, source_ref)
+        except Exception as error:
+            logger.warning("Manager correction rollback was partial: %s", error)
     try:
         await task_service.process_event(
             content, source_tool, source_ref, external_event_id=event_key
@@ -318,15 +455,112 @@ async def _record_sidecars(content: str, source_tool: str, source_ref: str) -> N
         )
     except Exception as error:
         logger.warning("Manager fact hook failed after successful write: %s", error)
-    await _record_xinchao(content, source_tool, source_ref)
 
 
 async def _record_task_hormone(content: str, task_id: int) -> None:
-    """Let manual task changes affect inner state without scheduling Bark."""
+    """Route a manual unfinished-item change through the shared event loop."""
+    await _record_xinchao(content, "manager_task", str(task_id))
+
+
+async def _xinchao_memory_resonance_provider(
+    state: dict, event_contexts: list[dict]
+) -> list[dict]:
+    settings = config.get("xinchao", {})
+    if not bool(settings.get("memory_resonance_enabled", True)):
+        return []
+    max_items = max(1, min(4, int(settings.get("memory_resonance_max_items", 3))))
+    threshold = max(
+        0.0, min(1.0, float(settings.get("memory_resonance_threshold", 0.68)))
+    )
+    context_text = " ".join(
+        str(item.get("context_card") or item.get("event_summary") or "")
+        for item in event_contexts[-3:]
+    ).strip()
+    strongest = sorted(
+        (state.get("pipes") or {}).items(),
+        key=lambda item: float(item[1]),
+        reverse=True,
+    )[:4]
+    state_text = " ".join(name for name, value in strongest if float(value) >= 0.25)
+    query = " ".join(part for part in (context_text, state_text) if part).strip()
+    if not query:
+        return []
+    result: list[dict] = []
     try:
-        await xinchao_service.record_event(content, "manager_task", str(task_id))
+        for bucket in await bucket_manager.search(
+            query,
+            limit=max_items,
+            use_semantic=True,
+            include_sealed=False,
+            semantic_min_similarity=threshold,
+            record_feedback=False,
+        ):
+            metadata = bucket.get("metadata") or {}
+            result.append(
+                {
+                    "source": "memory",
+                    "bucket_id": bucket.get("id", ""),
+                    "name": str(metadata.get("name") or bucket.get("id", ""))[:80],
+                    "excerpt": str(
+                        bucket.get("matched_segment") or bucket.get("content", "")
+                    ).strip()[:240],
+                    "relevance": round(float(bucket.get("score", 0.0)) / 100.0, 4),
+                    "semantic_similarity": bucket.get("semantic_score"),
+                    "bm25_score": bucket.get("bm25_score"),
+                }
+            )
     except Exception as error:
-        logger.warning("Manager task hormone hook failed: %s", error)
+        logger.warning("Manager memory resonance search unavailable: %s", error)
+    try:
+        for item in await search_mailbox(
+            mailbox_store,
+            bucket_manager.embedding_index,
+            query,
+            limit=max_items,
+            include_deleted=False,
+        ):
+            result.append(
+                {
+                    "source": "mailbox",
+                    "message_id": int(item["message_id"]),
+                    "created_at": item.get("created_at"),
+                    "excerpt": str(item.get("message", "")).strip()[:240],
+                    "relevance": round(float(item.get("match_score", 0.0)), 4),
+                    "semantic_similarity": item.get("semantic_score"),
+                    "keyword_score": item.get("keyword_score"),
+                }
+            )
+    except Exception as error:
+        logger.warning("Manager mailbox resonance search unavailable: %s", error)
+    result.sort(key=lambda item: float(item.get("relevance", 0.0)), reverse=True)
+    return result[:max_items]
+
+
+async def _xinchao_task_context_provider(
+    state: dict, event_contexts: list[dict]
+) -> list[dict]:
+    context_text = " ".join(
+        str(item.get("context_card") or item.get("event_summary") or "")
+        for item in event_contexts[-3:]
+    ).strip()
+    if context_text:
+        return await task_service.context(context_text, limit=3)
+    items = await task_service.store.list(status="open", limit=3)
+    return [
+        {
+            "task_id": item["task_id"],
+            "title": item["title"],
+            "details": str(item.get("details", ""))[:500],
+            "importance": item["importance"],
+        }
+        for item in items
+    ]
+
+
+xinchao_service.set_memory_resonance_provider(_xinchao_memory_resonance_provider)
+xinchao_service.set_task_context_provider(_xinchao_task_context_provider)
+behavior_service.set_feedback_callback(xinchao_service.apply_behavior_feedback)
+behavior_service.set_tendency_provider(xinchao_service.behavior_tendency_context)
 
 
 class BucketCreate(BaseModel):
@@ -372,6 +606,11 @@ class PermanentDeleteRequest(BaseModel):
 
 
 class TopicAssignmentUpdate(BaseModel):
+    main_topic: str = Field(min_length=1, max_length=80)
+    subtopic: str = Field(min_length=1, max_length=80)
+
+
+class TopicCreate(BaseModel):
     main_topic: str = Field(min_length=1, max_length=80)
     subtopic: str = Field(min_length=1, max_length=80)
 
@@ -457,6 +696,10 @@ class FactTimelineCreate(BaseModel):
 
 class BehaviorAcknowledgeRequest(BaseModel):
     action_id: int = Field(default=0, ge=0)
+
+
+class BehaviorSettingsUpdate(BaseModel):
+    push_title: str = Field(min_length=1, max_length=60)
 
 
 class JudgeRelation(BaseModel):
@@ -681,7 +924,12 @@ async def create_bucket(payload: BucketCreate) -> dict:
                 pin_level=payload.pin_level,
                 _history_operation="manager_pin_level",
             )
-    await _record_sidecars(payload.content.strip(), "manager_create", bucket_id)
+    await _record_sidecars(
+        payload.content.strip(),
+        "manager_memory",
+        bucket_id,
+        correction_key=f"memory:{bucket_id}",
+    )
     created = await bucket_manager.get(bucket_id)
     if created:
         await topic_store.auto_assign(
@@ -786,6 +1034,13 @@ async def update_bucket(bucket_id: str, payload: BucketUpdate) -> dict:
         raise HTTPException(status_code=409, detail="修改未完成；原记忆没有变化。")
     if xinchao_content:
         await _record_sidecars(xinchao_content, "manager_append", bucket_id)
+    elif payload.content is not None and "content" in updates:
+        await _record_sidecars(
+            str(updates["content"]),
+            "manager_memory",
+            bucket_id,
+            correction_key=f"memory:{bucket_id}",
+        )
     return {"ok": True}
 
 
@@ -853,7 +1108,9 @@ async def topics() -> dict:
         key = f"{item['main_topic']}\0{item['subtopic']}"
         counts[key] = counts.get(key, 0) + 1
     tree = []
-    for main, subtopics in TOPIC_TREE.items():
+    for branch in topic_store.tree():
+        main = branch["main_topic"]
+        subtopics = branch["subtopics"]
         tree.append(
             {
                 "main_topic": main,
@@ -875,6 +1132,24 @@ async def topics() -> dict:
     }
 
 
+@app.post("/api/topics")
+async def create_topic(payload: TopicCreate) -> dict:
+    try:
+        item = await topic_store.add_topic(payload.main_topic, payload.subtopic)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    return {"ok": True, "item": item}
+
+
+@app.delete("/api/topics")
+async def delete_topic(main_topic: str, subtopic: str) -> dict:
+    try:
+        removed = await topic_store.remove_topic(main_topic, subtopic)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    return {"ok": True, "removed": removed}
+
+
 @app.get("/api/topics/buckets")
 async def topic_buckets(
     main_topic: str = "",
@@ -891,7 +1166,7 @@ async def topic_buckets(
         ]
     else:
         try:
-            validate_topic(main_topic, subtopic)
+            topic_store.validate(main_topic, subtopic)
         except ValueError as error:
             raise HTTPException(status_code=400, detail=str(error)) from error
         ids = {
@@ -944,7 +1219,10 @@ async def topic_preview(smart: bool = True) -> dict:
         return cached
     warning = ""
     if smart and items and xinchao_service.evaluator.client:
-        tree = {main: list(subtopics) for main, subtopics in TOPIC_TREE.items()}
+        tree = {
+            item["main_topic"]: list(item["subtopics"])
+            for item in topic_store.tree()
+        }
         classified = {}
         try:
             for start in range(0, len(items), 8):
@@ -991,7 +1269,7 @@ async def topic_preview(smart: bool = True) -> dict:
                 )
                 for result in payload.get("items", []):
                     try:
-                        main, sub = validate_topic(
+                        main, sub = topic_store.validate(
                             result.get("main_topic", ""), result.get("subtopic", "")
                         )
                     except (ValueError, AttributeError):
@@ -1093,58 +1371,119 @@ async def mailbox_messages(
 
 @app.get("/api/search")
 async def intelligent_search(
-    q: str = Query(min_length=1, max_length=300),
-    source: Literal["all", "memory", "mailbox"] = "all",
-    limit: int = Query(default=12, ge=1, le=30),
+    q: str = Query(default="", max_length=300),
+    source: Literal["all", "memory", "mailbox", "thoughts"] = "all",
+    person: str = Query(default="", max_length=120),
+    date: str = Query(default="", max_length=10),
+    limit: int = Query(default=12, ge=1, le=100),
 ) -> dict:
-    """Search memories and mailbox with their existing hybrid indexes."""
+    """Read-only hybrid search by text, person and/or Beijing calendar date."""
     query = q.strip()
+    person_filter = person.strip()
+    date_filter = date.strip()
+    if date_filter and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", date_filter):
+        raise HTTPException(status_code=400, detail="日期必须使用 YYYY-MM-DD。")
+    if not (query or person_filter or date_filter):
+        raise HTTPException(status_code=400, detail="请至少填写关键字、人物或日期中的一项。")
+
+    def matches_filters(item: dict) -> bool:
+        searchable = json.dumps(item, ensure_ascii=False, default=str)
+        if person_filter and person_filter.casefold() not in searchable.casefold():
+            return False
+        if date_filter and date_filter not in searchable:
+            return False
+        return True
+
     memory_items = []
     mailbox_items = []
+    thought_items = []
     if source in {"all", "memory"}:
-        matches = await bucket_manager.search(
-            query,
-            limit=limit,
-            use_semantic=True,
-            include_sealed=False,
-            record_feedback=False,
-        )
+        if query:
+            matches = await bucket_manager.search(
+                query,
+                limit=max(limit * 3, 30),
+                use_semantic=True,
+                include_sealed=False,
+                record_feedback=False,
+            )
+        else:
+            matches = await bucket_manager.list_all(
+                include_archive=True, include_sealed=False
+            )
         for bucket in matches:
             view = _bucket_view(bucket)
             matched = bucket.get("matched_segment") or {}
             snippet = str(matched.get("content") or view["summary"])
-            memory_items.append(
-                {
-                    **view,
-                    "source": "memory",
-                    "snippet": _summary(snippet, 240),
-                    "score": bucket.get("score"),
-                    "semantic_score": bucket.get("semantic_score"),
-                }
-            )
+            item = {
+                **view,
+                "source": "memory",
+                "snippet": _summary(snippet, 240),
+                "score": bucket.get("score"),
+                "semantic_score": bucket.get("semantic_score"),
+            }
+            if matches_filters(item):
+                memory_items.append(item)
     if source in {"all", "mailbox"}:
-        matches = await search_mailbox(
-            mailbox_store,
-            bucket_manager.embedding_index,
-            query,
-            limit=limit,
-        )
-        mailbox_items = [
-            {
+        if query:
+            matches = await search_mailbox(
+                mailbox_store,
+                bucket_manager.embedding_index,
+                query,
+                limit=max(limit * 3, 30),
+            )
+        else:
+            matches = await mailbox_store.search_pool(
+                include_deleted=False, limit=max(limit * 10, 100)
+            )
+        mailbox_items = []
+        for item in matches:
+            public_item = {
                 **item,
                 "source": "mailbox",
-                "title": f"信箱留言 #{item['message_id']}",
+                "title": "窗口交接信",
                 "snippet": _summary(item.get("message", ""), 240),
                 "score": item.get("match_score"),
             }
-            for item in matches
-        ]
+            if matches_filters(public_item):
+                mailbox_items.append(public_item)
+    if source in {"all", "thoughts"}:
+        if query:
+            matches = await xinchao_service.search_private_thoughts(
+                query,
+                kind="all",
+                limit=max(limit * 3, 30),
+            )
+        else:
+            matches = await xinchao_service.list_private_thoughts(
+                status="all", limit=max(limit * 10, 100)
+            )
+        thought_items = []
+        for item in matches:
+            public_item = {
+                **item,
+                "source": item.get("source", "thought"),
+                "title": item.get("kind_label", "心念"),
+                "snippet": _summary(item.get("thought_text", ""), 240),
+                "score": round(float(item.get("match_score", 0.0)) * 100, 2),
+                "semantic_score": item.get("semantic_score"),
+                "private": True,
+                "read_only": True,
+            }
+            if matches_filters(public_item):
+                thought_items.append(public_item)
     items = sorted(
-        [*memory_items, *mailbox_items],
+        [*memory_items, *mailbox_items, *thought_items],
         key=lambda item: float(item.get("score") or 0),
         reverse=True,
     )[:limit]
-    return {"query": query, "source": source, "items": items, "count": len(items)}
+    return {
+        "query": query,
+        "source": source,
+        "person": person_filter,
+        "date": date_filter,
+        "items": items,
+        "count": len(items),
+    }
 
 
 @app.get("/api/timeline")
@@ -1166,7 +1505,9 @@ async def fact_timeline(
                 bucket = await bucket_manager.get(row.get("source_bucket_id", ""))
             except Exception:
                 continue
-            metadata = bucket.get("metadata", {})
+            # A legacy or partially migrated bucket may have a NULL metadata
+            # value. One malformed source must not take down the whole timeline.
+            metadata = (bucket or {}).get("metadata") or {}
             if metadata.get("sealed") or str(metadata.get("type", "")).lower() == "archived":
                 continue
             versions.append(row)
@@ -1220,6 +1561,13 @@ async def create_fact_timeline(payload: FactTimelineCreate) -> dict:
             source_ref=source_id or "manager",
             source_excerpt=payload.source_excerpt,
         )
+        if item.get("status") != "unchanged":
+            await _record_xinchao(
+                f"我确认了一条事实变化：{payload.fact}，现在是“{payload.value}”。",
+                "manager_timeline",
+                str(item.get("version_id") or item.get("fact_key") or payload.fact),
+                correction_key=f"timeline:{item.get('fact_key') or payload.fact}",
+            )
         return {"item": item, "status": item["status"]}
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
@@ -1228,7 +1576,16 @@ async def create_fact_timeline(payload: FactTimelineCreate) -> dict:
 @app.post("/api/timeline/candidates/{candidate_id}/confirm")
 async def confirm_fact_candidate(candidate_id: int) -> dict:
     try:
-        return await fact_timeline_service.confirm_candidate(candidate_id)
+        result = await fact_timeline_service.confirm_candidate(candidate_id)
+        item = result.get("item") if isinstance(result, dict) else None
+        if isinstance(item, dict):
+            await _record_xinchao(
+                f"我确认了一条事实变化：{item.get('fact_label') or item.get('fact') or ''}，现在是“{item.get('value') or ''}”。",
+                "fact_candidate",
+                str(candidate_id),
+                correction_key=f"timeline:{item.get('fact_key') or item.get('fact_label') or item.get('fact') or candidate_id}",
+            )
+        return result
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
 
@@ -1281,7 +1638,12 @@ async def create_task(payload: TaskCreate) -> dict:
         item = await task_service.create_manual(
             payload.title, payload.details, payload.importance, source="manager"
         )
-        await _record_task_hormone(f"我记下了一件还要做的事：{item['title']}。", item["task_id"])
+        await _record_xinchao(
+            f"我记下了一件还要做的事：{item['title']}。",
+            "manager_task_content",
+            str(item["task_id"]),
+            correction_key=f"task:{item['task_id']}:content",
+        )
         return {
             "ok": True,
             "item": _public_task_item(await task_service.store.get(item["task_id"])),
@@ -1298,9 +1660,19 @@ async def update_task(task_id: int, payload: TaskUpdate) -> dict:
     try:
         item = await task_service.update_manual(task_id, **changes)
         state_words = {"open": "重新开始处理", "completed": "已经完成", "cancelled": "已经取消"}
-        await _record_task_hormone(
-            f"未竟事项“{item['title']}”{state_words[item['status']]}。", task_id
-        )
+        if "status" in changes:
+            await _record_xinchao(
+                f"未竟事项“{item['title']}”{state_words[item['status']]}。",
+                "manager_task_status",
+                str(task_id),
+            )
+        else:
+            await _record_xinchao(
+                f"我修改了一件未竟事项：{item['title']}。{item.get('details') or ''}",
+                "manager_task_content",
+                str(task_id),
+                correction_key=f"task:{task_id}:content",
+            )
         return {
             "ok": True,
             "item": _public_task_item(await task_service.store.get(task_id)),
@@ -1333,6 +1705,12 @@ async def update_mailbox_message(
         result = await mailbox_store.update(message_id, payload.message)
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
+    await _record_sidecars(
+        payload.message,
+        "mailbox",
+        str(message_id),
+        correction_key=f"mailbox:{message_id}",
+    )
     return {"ok": True, "snapshot_created": True, "item": result}
 
 
@@ -1391,11 +1769,13 @@ async def xinchao_darkflow() -> dict:
 
 @app.get("/api/mind/thoughts")
 async def private_thoughts(
-    status: Literal["active", "flash", "obsession", "resolved", "faded"] = "active",
+    status: Literal["active", "all", "flash", "obsession", "resolved", "faded"] = "active",
     limit: int = Query(default=100, ge=1, le=500),
 ) -> dict:
     """Private inner thoughts never enter Bark, mailbox, or factual buckets."""
-    items = await xinchao_service.list_private_thoughts(status=status, limit=limit)
+    items = await xinchao_service.list_private_thoughts(
+        status=status, limit=limit, kind="inner"
+    )
     return {
         "items": items,
         "count": len(items),
@@ -1404,8 +1784,36 @@ async def private_thoughts(
     }
 
 
+@app.get("/api/mind/traces")
+async def private_thought_traces(
+    q: str = Query(default="", max_length=300),
+    date: str = Query(default="", max_length=10),
+    limit: int = Query(default=100, ge=1, le=500),
+) -> dict:
+    """Read-only timeline/search view for AI-written private thought traces."""
+    items = await xinchao_service.search_private_thoughts(
+        q,
+        kind="trace",
+        date=date,
+        limit=limit,
+    )
+    return {
+        "items": items,
+        "count": len(items),
+        "kind": "trace",
+        "display_name": "念痕",
+        "privacy": "inner_only",
+        "read_only": True,
+        "ai_write_only": True,
+        "search": q.strip(),
+        "date": date.strip(),
+    }
+
+
 @app.post("/api/mind/thoughts/{canonical_tag}/resolve")
 async def resolve_private_thought(canonical_tag: str) -> dict:
+    if await xinchao_service.is_read_only_trace(canonical_tag):
+        raise HTTPException(status_code=403, detail="念痕只能由 AI 写入，网页只读，不能修改。")
     if not await xinchao_service.resolve_private_thought(canonical_tag):
         raise HTTPException(status_code=404, detail="没有找到这条心念。")
     return {"ok": True, "canonical_tag": canonical_tag, "status": "resolved"}
@@ -1413,6 +1821,8 @@ async def resolve_private_thought(canonical_tag: str) -> dict:
 
 @app.delete("/api/mind/thoughts/{canonical_tag}")
 async def delete_private_thought(canonical_tag: str) -> dict:
+    if await xinchao_service.is_read_only_trace(canonical_tag):
+        raise HTTPException(status_code=403, detail="念痕只能由 AI 写入，网页只读，不能删除。")
     if not await xinchao_service.delete_private_thought(canonical_tag):
         raise HTTPException(status_code=404, detail="没有找到这条心念。")
     return {"ok": True, "canonical_tag": canonical_tag, "deleted": True}
@@ -1483,7 +1893,159 @@ async def xinchao_resonance() -> dict:
             reasons.append("此刻较强的感受：" + "、".join(labels))
         item["why"] = "；".join(reasons) or "与本轮事件产生联系"
         items.append(item)
-    return {"items": items, "count": len(items), "as_of": state.get("as_of")}
+    tension = await xinchao_tension()
+    return {
+        "items": items,
+        "count": len(items),
+        "as_of": state.get("as_of"),
+        "tension": tension,
+        "strongest": tension.get("strongest") or {},
+        "counterweight": tension.get("counterweight") or {},
+        "balance": tension.get("balance", 0.0),
+    }
+
+
+@app.get("/api/xinchao/transitions")
+async def xinchao_transitions(
+    limit: int = Query(default=50, ge=1, le=200),
+) -> dict:
+    items = await xinchao_service.recent_transitions(limit=limit)
+    return {"items": items, "count": len(items)}
+
+
+@app.get("/api/xinchao/linkages")
+async def xinchao_linkages(
+    limit: int = Query(default=30, ge=1, le=200),
+) -> dict:
+    """Readable write -> hormone links, including historical events."""
+    items = await xinchao_service.recent_linkages(limit=limit)
+    return {"items": items, "count": len(items)}
+
+
+@app.get("/api/disposition")
+async def disposition(days: int = Query(default=30, ge=7, le=120)) -> dict:
+    return await xinchao_service.disposition_preview(days=days)
+
+
+@app.get("/api/brain/context")
+async def brain_context(
+    q: str = Query(default="", max_length=500),
+    limit: int = Query(default=6, ge=1, le=20),
+) -> dict:
+    """Return the same cross-layer read model exposed to the using AI."""
+    return await build_brain_context(
+        q,
+        bucket_manager=bucket_manager,
+        mailbox_store=mailbox_store,
+        xinchao_service=xinchao_service,
+        task_service=task_service,
+        fact_timeline_store=fact_timeline_store,
+        limit=limit,
+    )
+
+
+@app.get("/api/living-memory/{bucket_id}")
+async def living_memory(bucket_id: str) -> dict:
+    bucket = await bucket_manager.get(bucket_id)
+    if not bucket:
+        raise HTTPException(status_code=404, detail="没有找到这条记忆。")
+    metadata = bucket.get("metadata") or {}
+    if bool(metadata.get("sealed")) or str(metadata.get("type", "")).lower() == "archived":
+        raise HTTPException(status_code=403, detail="封存记忆不重新计算单条认知脉络。")
+    relations, facts, topic = await asyncio.gather(
+        relation_store.related_details(bucket_id),
+        fact_timeline_store.versions_for_bucket(bucket_id),
+        topic_store.get(bucket_id),
+    )
+    coordinates = living_memory_store.build(
+        bucket,
+        relations=relations,
+        facts=facts,
+        topic=topic,
+    )
+    return await living_memory_store.save(coordinates)
+
+
+@app.get("/api/home")
+async def home_state() -> dict:
+    (
+        current,
+        tension,
+        darkflow,
+        traces,
+        thoughts,
+        disposition_value,
+        transitions,
+        boot,
+        phrase,
+        pending,
+    ) = await asyncio.gather(
+        xinchao_service.status(),
+        xinchao_tension(),
+        xinchao_service.darkflow_status(),
+        xinchao_service.search_private_thoughts("", kind="trace", limit=20),
+        xinchao_service.list_private_thoughts(status="active", limit=20),
+        xinchao_service.disposition_preview(days=30),
+        xinchao_service.recent_transitions(limit=30),
+        xinchao_service.latest_boot_delivery(),
+        _get_house_phrase(),
+        behavior_service.store.pending_handoff_summary(),
+    )
+    last_delivery_at = str((boot or {}).get("delivered_at") or "")
+    current_trace = next(
+        (
+            item
+            for item in traces
+            if not item.get("resolved")
+            and (
+                not last_delivery_at
+                or str(item.get("last_seen") or item.get("created_at") or "")
+                >= last_delivery_at
+            )
+        ),
+        None,
+    )
+    if current_trace:
+        most_wanted = {"source": "trace", "display_name": "念痕", "item": current_trace}
+    elif darkflow and darkflow.get("content"):
+        most_wanted = {"source": "darkflow", "display_name": "暗涌", "item": darkflow}
+    elif thoughts:
+        most_wanted = {"source": "thought", "display_name": "心念", "item": thoughts[0]}
+    else:
+        most_wanted = {"source": "", "display_name": "", "item": None}
+    return {
+        "as_of": current.get("as_of") or now_iso(),
+        "state": current,
+        "tension": tension,
+        "most_wanted": most_wanted,
+        "disposition": disposition_value,
+        "transitions": transitions,
+        "latest_boot_delivery": boot,
+        "house_phrase": {
+            "text": phrase.get("text") or HOUSE_PHRASE_FALLBACK,
+            "generated_at": phrase.get("generated_at", ""),
+        },
+        "pending_push": pending,
+    }
+
+
+@app.get("/api/continuity/status")
+async def continuity_status() -> dict:
+    state, boot, darkflow, mailbox, pending = await asyncio.gather(
+        xinchao_service.status(),
+        xinchao_service.latest_boot_delivery(),
+        xinchao_service.darkflow_status(),
+        mailbox_store.list(limit=1, include_deleted=False),
+        behavior_service.store.pending_handoff_summary(),
+    )
+    return {
+        "as_of": now_iso(),
+        "state": state,
+        "latest_boot_delivery": boot,
+        "darkflow": darkflow,
+        "latest_mailbox": mailbox[0] if mailbox else None,
+        "pending_push": pending,
+    }
 
 
 @app.get("/api/calendar")
@@ -1533,12 +2095,17 @@ async def toolbox() -> dict:
         "items": [
             {"id": "search", "name": "智能搜索", "description": "按原话或意思找记忆与信箱", "icon": "search"},
             {"id": "timeline", "name": "事实时间线", "description": "沿日期查看新旧事实", "icon": "git-branch"},
-            {"id": "calendar", "name": "记忆日历", "description": "查看某一天留下的内容", "icon": "calendar-days"},
             {"id": "tasks", "name": "未竟", "description": "管理还没有完成的事", "icon": "circle-check-big"},
             {"id": "treasury", "name": "小金库", "description": "AI自己的收入与支出", "icon": "wallet-cards"},
             {"id": "mailbox", "name": "信箱", "description": "窗口之间留下的接力信", "icon": "mail-open"},
             {"id": "darkflow", "name": "暗涌", "description": "沉默期间形成的一封内心沉淀", "icon": "waves"},
-            {"id": "thoughts", "name": "心念", "description": "只对内可见的闪念与执念", "icon": "sparkles"},
+            {"id": "thoughts", "name": "念痕", "description": "当前 AI 留下的真实当下", "icon": "feather"},
+            {"id": "mind", "name": "心念", "description": "沉默中浮现的闪念与执念", "icon": "sparkles"},
+            {"id": "resonance", "name": "共振与张力", "description": "查看记忆与此刻怎样相互牵动", "icon": "radio"},
+            {"id": "behavior", "name": "行为与推送", "description": "查看推送判断和送达状态", "icon": "send"},
+            {"id": "personality", "name": "性格轨迹", "description": "查看本月倾向怎样形成", "icon": "route"},
+            {"id": "coordinates", "name": "认知脉络", "description": "汇合时间、关系、事实、情绪与沉淀", "icon": "network"},
+            {"id": "settings", "name": "设置与安全", "description": "管理密码、推送名称和判定规则", "icon": "settings"},
         ]
     }
 
@@ -1549,10 +2116,53 @@ async def behavior_actions(
     before_id: int = Query(default=0, ge=0),
 ) -> dict:
     items = await behavior_service.store.list(limit=limit, before_id=before_id)
+    candidates = await behavior_service.store.list_candidates(limit=limit)
+    status_labels = {
+        "sent": "已推送", "skipped": "本次未推送", "cancelled": "已取消",
+        "expired": "已结束", "pending": "等待判断", "waiting": "等待合适时机",
+        "held": "暂存", "rehearsal": "生成中",
+    }
+    for item in items:
+        item["status_label"] = status_labels.get(str(item.get("status") or ""), "推送记录")
+        item["display_content"] = str(item.get("content") or "").strip()
+        item["display_reason"] = str(item.get("error") or "").strip()
+        item["record_kind"] = "delivery"
+    for item in candidates:
+        item["status_label"] = status_labels.get(str(item.get("status") or ""), "推送判断")
+        item["display_reason"] = str(item.get("decision_note") or "").strip()
+        item["record_kind"] = "decision"
+    pending = await behavior_service.store.pending_handoff_summary()
     return {
         "items": items,
-        "candidates": await behavior_service.store.list_candidates(limit=limit),
+        "sent_items": [item for item in items if item.get("status") == "sent"],
+        "decisions": candidates,
+        "candidates": candidates,
         "count": await asyncio.to_thread(behavior_service.store.count),
+        "mode": behavior_service.mode,
+        "configured": behavior_service.configured,
+        "push_title": await behavior_service.push_title(),
+        "pending": pending,
+    }
+
+
+@app.get("/api/behavior/settings")
+async def behavior_settings() -> dict:
+    return {
+        "push_title": await behavior_service.push_title(),
+        "mode": behavior_service.mode,
+        "configured": behavior_service.configured,
+    }
+
+
+@app.put("/api/behavior/settings")
+async def update_behavior_settings(payload: BehaviorSettingsUpdate) -> dict:
+    try:
+        title = await behavior_service.set_push_title(payload.push_title)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    return {
+        "ok": True,
+        "push_title": title,
         "mode": behavior_service.mode,
         "configured": behavior_service.configured,
     }
@@ -1581,12 +2191,23 @@ async def acknowledge_behavior(
             silence_ids
         )
     if not stateful_ids:
+        state = await xinchao_service.observe_presence(
+            session_id="manager",
+            source="manager:behavior_acknowledge",
+            event_id=str(acknowledged.get("acknowledged_at") or ""),
+            start_cycle=True,
+            interrupt_silence=True,
+        )
+        await behavior_service.store.cancel_for_activity(
+            int(state.get("previous_cycle_id", state.get("cycle_id", 0)) or 0)
+        )
         return {
             "status": "acknowledged",
-            "phase": "legacy_silence",
+            "phase": acknowledged.get("phase") or "silence",
             "message": "已经清掉旧版沉默提醒；它不会影响激素、心念或暗涌。",
             "acknowledged_at": acknowledged.get("acknowledged_at"),
             "count": acknowledged.get("count", 0),
+            "active_started_at": state.get("active_started_at"),
         }
 
     state = await xinchao_service.acknowledge_seen()
@@ -1609,7 +2230,9 @@ async def xinchao_judge() -> dict:
     evaluator = xinchao_service.evaluator
     return {
         **evaluator.read_judge_config(),
-        "base_rules": EVALUATOR_PROMPT.format(pipes="、".join(PIPE_NAMES)),
+        "base_rules": EVALUATOR_PROMPT.format(
+            pipes="、".join(PIPE_NAMES), pipe_guide=PIPE_GUIDE
+        ),
         "prompt_hash": evaluator.prompt_hash,
         "hot_reload": True,
     }
@@ -1665,6 +2288,14 @@ async def create_treasury_entry(payload: TreasuryCreate) -> dict:
         )
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
+    entry = result.get("entry") or {}
+    kind = "收入" if entry.get("entry_type") == "income" else "支出"
+    await _record_xinchao(
+        f"我在小金库记下了一笔{kind}：{entry.get('reason') or payload.reason}。",
+        "manager_treasury",
+        str(entry.get("entry_id") or ""),
+        correction_key=f"treasury:{entry.get('entry_id') or ''}",
+    )
     return {"ok": True, **result}
 
 
@@ -1682,6 +2313,13 @@ async def update_treasury_entry(
         )
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
+    entry = result.get("entry") or {}
+    await _record_xinchao(
+        f"我修改了一笔小金库记录：{entry.get('reason') or payload.reason or ''}。",
+        "manager_treasury",
+        str(entry_id),
+        correction_key=f"treasury:{entry_id}",
+    )
     return {"ok": True, **result}
 
 

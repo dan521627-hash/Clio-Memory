@@ -67,34 +67,54 @@ class FactTimelineService:
             "event": str(content or "").strip()[:12000],
             "current_facts": current_facts,
         }
-        response = await self.evaluator.client.chat.completions.create(
-            model=self.evaluator.model,
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
+        system_prompt = (
                         "你只负责发现可进入事实时间线的候选变化，不得直接修改事实。"
                         "只抓明确、可核对、以后可能发生新旧变化的事实，例如日期、金额、地点、"
                         "关系状态、订阅状态、设备、长期偏好或固定设置。不要抓情绪、感想、比喻、"
-                        "私密叙事、一次性动作或不确定猜测。若新事件与已有事实不同，previous_value"
-                        "填写旧值；若是首次出现的稳定事实则留空。effective_date 使用事件明确给出的"
+                        "私密叙事、一次性动作或不确定猜测。计划、进行中、已抵达、已完成这类同一事件的"
+                        "连续阶段应当进入同一条事实线：只要 current_facts 已有对应事项，就必须逐字复用"
+                        "已有 fact 名称，把阶段变化写进 value，不得另起一个近义事实名称。例如已有"
+                        "‘北京行程’，后续‘正在坐车’和‘已经抵达’仍使用 fact=‘北京行程’。若新事件与"
+                        "已有事实不同，previous_value 填写旧值；若是首次出现的稳定事实则留空。"
+                        "effective_date 使用事件明确给出的"
                         "日期；没有明确日期时使用 today_beijing。confidence 低于0.75的不要返回。"
-                        "最多返回3条。只返回JSON：{\"candidates\":[{\"fact\":\"事实名称\","
+                        "最多返回3条。只返回严格 JSON 对象：{\"candidates\":[{\"fact\":\"事实名称\","
                         "\"value\":\"新值\",\"previous_value\":\"旧值或空\","
                         "\"effective_date\":\"YYYY-MM-DD\",\"confidence\":0.0,"
                         "\"reason\":\"为什么认为发生变化\",\"evidence\":\"原文短句\"}]}。"
                         "没有明确事实就返回空数组。"
-                    ),
+        )
+        payload = None
+        last_error = None
+        for attempt in range(3):
+            messages = [
+                {
+                    "role": "system",
+                    "content": system_prompt,
                 },
                 {"role": "user", "content": json.dumps(context, ensure_ascii=False)},
-            ],
-            max_tokens=700,
-            temperature=0.0,
-            response_format={"type": "json_object"},
-            extra_body={"thinking": {"type": "disabled"}},
-        )
-        raw = response.choices[0].message.content if response.choices else ""
-        payload = self.evaluator._clean_json(str(raw or ""))
+            ]
+            if attempt:
+                messages.append({
+                    "role": "system",
+                    "content": "上次返回无效。现在只返回严格 JSON 对象，不要任何说明。",
+                })
+            try:
+                response = await self.evaluator.client.chat.completions.create(
+                    model=self.evaluator.model,
+                    messages=messages,
+                    max_tokens=700,
+                    temperature=0.0,
+                    response_format={"type": "json_object"},
+                    extra_body={"thinking": {"type": "disabled"}},
+                )
+                raw = response.choices[0].message.content if response.choices else ""
+                payload = self.evaluator._clean_json(str(raw or ""))
+                break
+            except Exception as error:
+                last_error = error
+        if payload is None:
+            raise last_error or ValueError("事实识别没有返回有效 JSON")
         candidates = payload.get("candidates", [])
         if not isinstance(candidates, list):
             return []
@@ -191,3 +211,7 @@ class FactTimelineService:
 
     async def ignore_candidate(self, candidate_id: int) -> dict:
         return await self.store.resolve_candidate(candidate_id, "ignored")
+
+    async def retract_source(self, source_type: str, source_ref: str) -> dict:
+        source_kind = "mailbox" if source_type == "mailbox" else "bucket"
+        return await self.store.retract_source_candidates(source_kind, source_ref)

@@ -45,6 +45,10 @@ class BehaviorService:
             0.0,
             min(1.0, float(settings.get("follow_up_hormone_threshold", 0.10))),
         )
+        self.schedule_recheck_hormone_threshold = max(
+            self.follow_up_hormone_threshold,
+            min(1.0, float(settings.get("schedule_recheck_hormone_threshold", 0.35))),
+        )
         self.burst_hormone_threshold = max(
             0.0,
             min(1.0, float(settings.get("burst_hormone_threshold", 0.75))),
@@ -69,6 +73,7 @@ class BehaviorService:
         self.evaluator = evaluator
         self.store = BehaviorStore(config)
         self.feedback_callback = None
+        self.tendency_provider = None
 
     @staticmethod
     def _parse_clock(value, fallback: time) -> time:
@@ -105,6 +110,22 @@ class BehaviorService:
 
     def set_feedback_callback(self, callback) -> None:
         self.feedback_callback = callback
+
+    def set_tendency_provider(self, callback) -> None:
+        """Attach the read-only 性格轨迹 context used by behavior decisions."""
+        self.tendency_provider = callback
+
+    async def _tendency_context(self) -> dict:
+        if self.tendency_provider is None:
+            return {}
+        try:
+            result = self.tendency_provider()
+            if hasattr(result, "__await__"):
+                result = await result
+            return result if isinstance(result, dict) else {}
+        except Exception as error:
+            logger.warning("Behavior tendency context unavailable: %s", error)
+            return {}
 
     async def _apply_sent_feedback(
         self, cycle_id: int, content: str, decision: dict
@@ -151,6 +172,17 @@ class BehaviorService:
                 r"(要|准备|打算|马上|一会儿|待会儿|等下|正在|刚)(出去|出门|出发|上路)"
                 r"|在路上|去(医院|体检|考试|面试|办事|旅行|出差)"
                 r"|到了?再说|到了?告诉|回来再说|结束后告诉",
+                text,
+            )
+        )
+
+    @staticmethod
+    def _has_closed_follow_up(contexts: list[dict]) -> bool:
+        """Avoid rechecking events whose context explicitly says they ended."""
+        text = BehaviorService._event_text(contexts)
+        return bool(
+            re.search(
+                r"(已经|刚刚)?(到家|回家|回来|平安到达|考完|面试完|看完医生|检查完|办完|结束了)",
                 text,
             )
         )
@@ -269,6 +301,7 @@ class BehaviorService:
     async def _unique_decision(self, context: dict, state: dict) -> dict:
         memory_resonance = list(context.get("memory_resonance") or [])[:2]
         recent_intents = await self.store.recent_intents(limit=8)
+        tendency_context = await self._tendency_context()
         intent = self._expression_intent(
             state, memory_resonance, recent_intents=recent_intents
         )
@@ -276,6 +309,7 @@ class BehaviorService:
             **context,
             "expression_intent": intent,
             "recent_expression_intents": recent_intents,
+            "tendency_context": tendency_context,
         }
         decision = await self.evaluator.behavior_decision(**request)
         messages = self._decision_messages(decision, state.get("pipes", {}))
@@ -380,9 +414,11 @@ class BehaviorService:
         hormone_name, hormone_drive = self._hormone_drive(state.get("pipes", {}))
         moment = beijing_now()
         try:
+            tendency_context = await self._tendency_context()
             decision = await self.evaluator.behavior_schedule(
                 event_contexts=contexts,
                 pipes=state.get("pipes", {}),
+                tendency_context=tendency_context,
             )
             follow_up = bool(decision.get("follow_up", False))
             delay = self._delay(decision.get("delay_minutes"))
@@ -401,6 +437,20 @@ class BehaviorService:
                 delay = min(delay, 30)
             reason = (
                 f"未完事件与激素联动：{hormone_name}={hormone_drive:.2f}"
+                + (f"；{reason}" if reason else "")
+            )
+        elif (
+            not follow_up
+            and contexts
+            and not self._has_closed_follow_up(contexts)
+            and hormone_drive >= self.schedule_recheck_hormone_threshold
+        ):
+            # The first call is only a gate. Keep a high-emotion, still-open
+            # event for one full behavior_decision pass instead of letting a
+            # conservative schedule answer permanently discard it.
+            follow_up = True
+            reason = (
+                f"情绪驱动较高，保留一次到点复核：{hormone_name}={hormone_drive:.2f}"
                 + (f"；{reason}" if reason else "")
             )
         due_at = moment + timedelta(minutes=delay)
@@ -495,6 +545,9 @@ class BehaviorService:
                         "due_at": candidate.get("due_at"),
                         "elapsed_seconds": state.get("elapsed_seconds", 0),
                         "sleep_stage": state.get("sleep_stage", ""),
+                        "schedule_recheck": str(
+                            candidate.get("decision_note", "")
+                        ).startswith("情绪驱动较高，保留一次到点复核"),
                     },
                     "required_follow_up": bool(candidate.get("follow_up_required")),
                     "hormone_context": {
@@ -640,7 +693,8 @@ class BehaviorService:
                     "elapsed_seconds": darkflow.get("elapsed_seconds", 0),
                     "sleep_stage": darkflow.get("sleep_stage", ""),
                     "presence_only": presence_only,
-                    "first_silence_nudge": phase == "silence",
+                    "first_silence_nudge": bool(darkflow.get("first_silence_nudge"))
+                    or (presence_only and stage_index == 1),
                     "interaction_phase": phase,
                 },
                 "memory_resonance": list(darkflow.get("memory_resonance") or []),

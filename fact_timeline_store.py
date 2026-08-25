@@ -13,6 +13,16 @@ from rapidfuzz import fuzz
 from utils import now_iso
 
 
+class _ClosingConnection(sqlite3.Connection):
+    """Commit or roll back and release the Windows file handle."""
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        try:
+            return super().__exit__(exc_type, exc_value, traceback)
+        finally:
+            self.close()
+
+
 class FactTimelineStore:
     """Keep fact history outside Markdown memory buckets."""
 
@@ -34,7 +44,9 @@ class FactTimelineStore:
             self._init_db()
 
     def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.db_path, timeout=30)
+        connection = sqlite3.connect(
+            self.db_path, timeout=30, factory=_ClosingConnection
+        )
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA journal_mode=WAL")
         connection.execute("PRAGMA synchronous=NORMAL")
@@ -412,6 +424,57 @@ class FactTimelineStore:
 
     async def resolve_candidate(self, candidate_id: int, status: str) -> dict:
         return await asyncio.to_thread(self._resolve_candidate_sync, candidate_id, status)
+
+    def _retract_source_candidates_sync(
+        self, source_type: str, source_ref: str
+    ) -> dict:
+        """Withdraw unconfirmed facts produced by content that was corrected."""
+        source_kind = str(source_type or "").strip().lower()
+        source_reference = str(source_ref or "").strip()[:160]
+        stamp = now_iso()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            pending = connection.execute(
+                """
+                SELECT candidate_id FROM fact_candidates
+                WHERE source_type=? AND source_ref=? AND status='pending'
+                """,
+                (source_kind, source_reference),
+            ).fetchall()
+            confirmed = connection.execute(
+                """
+                SELECT candidate_id FROM fact_candidates
+                WHERE source_type=? AND source_ref=? AND status='confirmed'
+                """,
+                (source_kind, source_reference),
+            ).fetchall()
+            connection.execute(
+                """
+                UPDATE fact_candidates SET status='ignored', resolved_at=?
+                WHERE source_type=? AND source_ref=? AND status='pending'
+                """,
+                (stamp, source_kind, source_reference),
+            )
+            connection.execute(
+                """
+                UPDATE fact_detection_events SET status='superseded', updated_at=?
+                WHERE source_type=? AND source_ref=? AND status IN ('applied','pending')
+                """,
+                (stamp, source_kind, source_reference),
+            )
+        return {
+            "candidates_withdrawn": [int(row["candidate_id"]) for row in pending],
+            "confirmed_require_review": [int(row["candidate_id"]) for row in confirmed],
+        }
+
+    async def retract_source_candidates(
+        self, source_type: str, source_ref: str
+    ) -> dict:
+        if not self.enabled:
+            return {"candidates_withdrawn": [], "confirmed_require_review": []}
+        return await asyncio.to_thread(
+            self._retract_source_candidates_sync, source_type, source_ref
+        )
 
     def _event_sync(self, event_key: str) -> dict | None:
         with self._connect() as connection:

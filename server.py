@@ -71,6 +71,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from mcp.server.fastmcp import FastMCP
 
 from bucket_manager import BucketManager
+from brain_context_service import build_brain_context
 from behavior_service import BehaviorService
 from calendar_view import build_calendar_day, format_calendar_day
 from conflict_detector import ConflictDetector
@@ -813,6 +814,7 @@ relation_store = RelationStore(config)
 fact_timeline_store = FactTimelineStore(config)
 treasury_store = TreasuryStore(config)
 xinchao_service = XinchaoService(config)
+xinchao_service.set_thought_embedding_provider(bucket_mgr.embedding_index)
 behavior_service = BehaviorService(config, xinchao_service.evaluator)
 task_service = TaskService(config, xinchao_service.evaluator, bucket_mgr.embedding_index)
 fact_timeline_service = FactTimelineService(
@@ -959,6 +961,9 @@ xinchao_service.set_task_context_provider(_xinchao_task_context_provider)
 behavior_service.set_feedback_callback(
     xinchao_service.apply_behavior_feedback
 )
+behavior_service.set_tendency_provider(
+    xinchao_service.behavior_tendency_context
+)
 
 
 def _active_mcp_session_key() -> str:
@@ -1006,6 +1011,7 @@ async def _record_xinchao_event(
     source_tool: str,
     source_ref: str = "",
     external_event_id: str = "",
+    correction_key: str = "",
 ) -> dict:
     """Evaluate one successful narrative write without risking the memory write."""
     try:
@@ -1015,16 +1021,37 @@ async def _record_xinchao_event(
             source_ref,
             external_event_id=external_event_id
             or _write_sidecar_event_id(content, source_tool, source_ref),
+            correction_key=correction_key,
         )
+        if not isinstance(result, dict):
+            return {"status": "pending", "error": "状态联动暂未返回结果"}
         if result.get("status") == "pending":
+            state = await xinchao_service.status()
+            await behavior_service.store.cancel_for_activity(state.get("cycle_id", 0))
+            superseded = result.get("superseded") or {}
+            if superseded.get("previous_cycle_id") is not None:
+                await behavior_service.store.cancel_for_activity(
+                    int(superseded.get("previous_cycle_id") or 0)
+                )
             logger.warning(
                 "Xinchao event queued after %s write: %s",
                 source_tool,
                 result.get("error", "evaluation unavailable"),
             )
-        elif result.get("status") == "applied":
+        if result.get("status") == "applied":
             try:
                 state = await xinchao_service.status()
+                await behavior_service.store.cancel_for_activity(state.get("cycle_id", 0))
+                superseded = result.get("superseded") or {}
+                if superseded.get("previous_cycle_id") is not None:
+                    await behavior_service.store.cancel_for_activity(
+                        int(superseded.get("previous_cycle_id") or 0)
+                    )
+                correction = result.get("correction") or {}
+                if correction.get("supersedes_event_id"):
+                    await behavior_service.store.cancel_source_event(
+                        int(correction["supersedes_event_id"])
+                    )
                 await behavior_service.schedule_event(result, state)
             except Exception as behavior_error:
                 logger.warning(
@@ -1044,6 +1071,7 @@ async def _record_write_sidecars(
     source_ref: str = "",
     *,
     task_content: str = "",
+    correction_key: str = "",
 ) -> dict:
     """Update independent sidecars after a successful narrative write."""
     event_id = _write_sidecar_event_id(content, source_tool, source_ref)
@@ -1052,7 +1080,23 @@ async def _record_write_sidecars(
         source_tool,
         source_ref,
         external_event_id=event_id,
+        correction_key=correction_key,
     )
+    correction = xinchao_result.get("correction") or {}
+    correction_result = {"tasks": {}, "facts": {}}
+    if correction.get("supersedes_event_id"):
+        try:
+            correction_result["tasks"] = await task_service.retract_source(
+                source_tool, source_ref
+            )
+        except Exception as error:
+            logger.warning("Task correction rollback failed for %s: %s", source_tool, error)
+        try:
+            correction_result["facts"] = await fact_timeline_service.retract_source(
+                source_tool, source_ref
+            )
+        except Exception as error:
+            logger.warning("Fact correction rollback failed for %s: %s", source_tool, error)
     try:
         task_result = await task_service.process_event(
             task_content or content,
@@ -1108,7 +1152,7 @@ async def _record_write_sidecars(
             }
         except Exception as error:
             logger.warning(
-                "LMC-5 refresh failed after successful %s write: %s",
+                "Mind-lattice refresh failed after successful %s write: %s",
                 source_tool,
                 error,
             )
@@ -1118,6 +1162,7 @@ async def _record_write_sidecars(
         "xinchao": xinchao_result,
         "fact_candidates": fact_result,
         "living_memory": lmc5_result,
+        "correction": correction_result,
     }
 
 
@@ -1131,13 +1176,21 @@ async def _observe_mcp_activity(session_id: str, messages: list[dict]) -> None:
         return
     latest = relevant[-1]
     source = latest.get("tool_name") or latest.get("method") or "mcp"
-    if source in {"heartbeat", "pulse_boot"}:
+    is_tool_call = latest.get("method") == "tools/call"
+    # heartbeat performs the same interruption inside the tool so stdio and
+    # HTTP transports behave identically; avoid recording it twice here.
+    if is_tool_call and source == "heartbeat":
         return
-    await xinchao_service.observe_presence(
+    observed = await xinchao_service.observe_presence(
         session_id=session_id,
         source=f"mcp:{source}",
         event_id=latest.get("request_id", ""),
+        interrupt_silence=is_tool_call,
     )
+    if is_tool_call:
+        await behavior_service.store.cancel_for_activity(
+            int(observed.get("previous_cycle_id", observed.get("cycle_id", 0)) or 0)
+        )
 
 # --- Create MCP server instance / 创建 MCP 服务器实例 ---
 # host="0.0.0.0" so Docker container's SSE is externally reachable
@@ -2031,6 +2084,7 @@ async def mailbox(
                 text,
                 "mailbox",
                 str(saved["message_id"]),
+                correction_key=f"mailbox:{saved['message_id']}",
             )
             return _with_response_seal(
                 f"留言已单独存入信箱 #{saved['message_id']}。\n"
@@ -2094,6 +2148,12 @@ async def mailbox(
                     f"原文:\n{current['message']}\n---\n拟修改为:\n{text}"
                 )
             updated = await mailbox_store.update(message_id, text)
+            await _record_write_sidecars(
+                text,
+                "mailbox",
+                str(message_id),
+                correction_key=f"mailbox:{message_id}",
+            )
             return _with_response_seal(
                 f"留言 #{message_id} 已修改，修改前原文已保存到历史快照。\n"
                 f"最后修改: {updated['updated_at']}\n{updated['message']}"
@@ -2199,13 +2259,11 @@ async def tasks(
                 source="mcp:tasks"
             )
             hormone_content = f"我新增了一件未完成的事：{item['title']}。"
-            await xinchao_service.record_event(
+            await _record_xinchao_event(
                 hormone_content,
-                "tasks",
+                "task_content",
                 str(item["task_id"]),
-                external_event_id=_write_sidecar_event_id(
-                    hormone_content, "tasks", str(item["task_id"])
-                ),
+                correction_key=f"task:{item['task_id']}:content",
             )
             return _with_response_seal("未竟事项已新增。\n" + render(item))
 
@@ -2237,14 +2295,19 @@ async def tasks(
             hormone_content = (
                 f"未竟事项“{item['title']}”{state_words[item['status']]}。"
             )
-            await xinchao_service.record_event(
-                hormone_content,
-                "tasks",
-                str(item["task_id"]),
-                external_event_id=_write_sidecar_event_id(
-                    hormone_content, "tasks", str(item["task_id"])
-                ),
-            )
+            if normalized == "update" and "status" not in changes:
+                await _record_xinchao_event(
+                    f"我修改了一件未竟事项：{item['title']}。{item.get('details') or ''}",
+                    "task_content",
+                    str(item["task_id"]),
+                    correction_key=f"task:{item['task_id']}:content",
+                )
+            else:
+                await _record_xinchao_event(
+                    hormone_content,
+                    "task_status",
+                    str(item["task_id"]),
+                )
             return _with_response_seal("未竟事项已更新。\n" + render(item))
 
         if normalized == "delete":
@@ -2514,12 +2577,11 @@ async def trace(
 # Tool 6: pulse_boot — Compact startup context
 # 工具 6：pulse_boot — 开机专用上下文
 # =============================================================
-PULSE_BOOT_TOOL_GUIDE = """【按需入口】
-记忆：breath 搜索/浮现；recall 读原文；calendar 按北京时间查某天；timeline 查事实变化；cabinet 看主题目录。
-写入：hold 记一件事；grow 归档并可留信；mailbox 查/改/删信；trace 修改桶；split_bucket 拆长桶。
-状态：xinchao_status 看激素；inner_state 看心念；living_memory 看五维坐标；self_state 看当前自我与人格走向；personality_preview 看人格轨迹；continuity_review 查连续性。
-事务：tasks 管未竟；treasury 管小金库；feedback 评价检索；digest_preview 只生成整理演习；pulse 看全库状态；heartbeat 报告当前仍在场。
-只在当前问题需要时调用，不要一次读取全库；pulse_boot 可在新窗口重复调用。"""
+PULSE_BOOT_TOOL_GUIDE = """【工具】
+记忆：breath 搜索与浮现；recall 读取原文；calendar 按日期回看；timeline 查看事实变化；cabinet 查看主题目录。
+写入：hold 写入记忆；grow 归档或留信；mailbox 管理信箱；trace 修改记忆；split_bucket 拆分长记忆。
+内在：xinchao_status 查看 48 项内在状态与衰减；thought_trace 写入念痕；thought_trace_update 修改念痕；inner_state 查看心念与念痕；brain_context 查看跨模块联动；living_memory 查看单条记忆的心智经纬；self_state、disposition_preview、personality_preview 查看性格轨迹；continuity_review 查看连续性。
+事务：tasks 管理未竟；treasury 管理小金库；feedback 评价检索；digest_preview 预览整理；pulse 查看全库状态；heartbeat 报告当前在场；pulse_boot 可在新窗口重复读取开机摘要。"""
 
 
 @mcp.tool()
@@ -2589,29 +2651,6 @@ async def pulse_boot() -> str:
         logger.warning("pulse_boot task read failed: %s", error)
         task_text = ""
         task_completion_ids = []
-
-    try:
-        timeline_pending_count, timeline_groups = await asyncio.gather(
-            fact_timeline_store.list_candidates(status="pending", limit=500),
-            fact_timeline_store.list_facts(limit=200),
-        )
-        timeline_pending_count = len(timeline_pending_count)
-        timeline_version_count = sum(
-            len(item.get("versions") or []) for item in timeline_groups
-        )
-        timeline_latest = max(
-            (
-                str(version.get("effective_date") or "")
-                for item in timeline_groups
-                for version in (item.get("versions") or [])
-            ),
-            default="",
-        )
-    except Exception as error:
-        logger.warning("pulse_boot timeline count failed: %s", error)
-        timeline_pending_count = 0
-        timeline_version_count = 0
-        timeline_latest = ""
 
     mailbox_text = await _pulse_boot_mailbox_section(mailbox_context)
     behavior_handoff_ids = []
@@ -2772,18 +2811,6 @@ async def pulse_boot() -> str:
         )
     if task_text:
         sections.append(f"【未竟】\n{task_text}")
-    if timeline_pending_count or timeline_version_count:
-        timeline_bits = []
-        if timeline_version_count:
-            timeline_bits.append(f"已记录 {timeline_version_count} 个事实节点")
-        if timeline_latest:
-            timeline_bits.append(f"最近变化 {timeline_latest}")
-        if timeline_pending_count:
-            timeline_bits.append(f"待确认 {timeline_pending_count} 条")
-        sections.append(
-            "【事实时间线】" + "；".join(timeline_bits)
-            + "。需要时调用 timeline 查看变化。"
-        )
     body = "\n\n".join(sections)
     if len(body) > max_chars:
         suffix = "\n\n【开机资料已达到固定上限，其余记忆请按需使用 recall 深读。】"
@@ -2818,7 +2845,7 @@ async def pulse_boot() -> str:
         await xinchao_service.record_boot_delivery(session_id, body)
     except Exception as error:
         logger.warning("pulse_boot delivery cursor write failed: %s", error)
-    return _with_response_seal(body)
+    return body
 
 
 # =============================================================
@@ -2834,6 +2861,124 @@ async def xinchao_status() -> str:
     except Exception as error:
         logger.warning("Xinchao status read failed: %s", error)
         return _with_response_seal("激素状态暂时无法读取，记忆桶未受影响。")
+
+
+@mcp.tool()
+async def thought_trace(
+    text: str,
+    tag: str = "",
+    tone: str = "mixed",
+    intensity: float = 0.3,
+    reason: str = "",
+    deltas_json: str = "",
+) -> str:
+    """thought_trace nianzhen 私密念痕：当前使用的 AI 写入当前窗口的一句话想法；网页和 DeepSeek 只能读取，不能修改。"""
+    raw_text = str(text or "")
+    if not raw_text.strip():
+        return _with_response_seal("念痕没有写入：内容不能为空。")
+    deltas = {}
+    if str(deltas_json or "").strip():
+        try:
+            parsed = json.loads(deltas_json)
+            if isinstance(parsed, dict):
+                deltas = parsed
+        except (TypeError, ValueError):
+            return _with_response_seal("念痕没有写入：deltas_json 必须是 JSON 对象。")
+    try:
+        result = await xinchao_service.record_thought_trace(
+            raw_text,
+            tag=tag,
+            tone=tone,
+            intensity=intensity,
+            reason=reason,
+            deltas=deltas,
+            source_ref=_active_mcp_session_key(),
+        )
+    except Exception as error:
+        logger.warning("Private thought trace failed: %s", error)
+        return _with_response_seal("念痕暂时没有写入，原有记忆没有受到影响。")
+    if result.get("status") != "recorded":
+        return _with_response_seal(f"念痕未写入：{result.get('reason', result.get('status', '未知原因'))}")
+    await behavior_service.store.cancel_for_activity(
+        result.get("previous_cycle_id", result.get("cycle_id", 0))
+    )
+    thought = result.get("thought") or {}
+    link_note = (
+        "情绪联动已应用。"
+        if result.get("deltas")
+        else "这句话已保存；本次没有识别到明确的情绪变化。"
+    )
+    if result.get("linkage_pending"):
+        link_note = "这句话已原样保存；情绪联动判断暂时不可用，正文没有被改动。"
+    return _with_response_seal(
+        "已记下这条念痕（仅内在私密层；当前 AI 可继续修改，网页和 DeepSeek 只读）。\n"
+        f"标识：{thought.get('canonical_tag', '')}\n"
+        f"时间（UTC+8）：{thought.get('last_seen', beijing_now().isoformat(timespec='seconds'))}\n"
+        f"想法：{thought.get('thought_text', raw_text)}\n"
+        f"{link_note}"
+    )
+
+
+@mcp.tool()
+async def thought_trace_update(
+    canonical_tag: str,
+    text: str,
+    tag: str = "",
+    tone: str = "mixed",
+    intensity: float = 0.3,
+    reason: str = "",
+    deltas_json: str = "",
+) -> str:
+    """thought_trace_update nianzhen revise 由当前使用的 AI 修改已有念痕；网页和 DeepSeek 不可调用修改。"""
+    source_id = str(canonical_tag or "").strip()
+    raw_text = str(text or "")
+    if not source_id:
+        return _with_response_seal("念痕没有修改：请提供原念痕标识。")
+    if not raw_text.strip():
+        return _with_response_seal("念痕没有修改：内容不能为空。")
+    deltas = {}
+    if str(deltas_json or "").strip():
+        try:
+            parsed = json.loads(deltas_json)
+            if isinstance(parsed, dict):
+                deltas = parsed
+        except (TypeError, ValueError):
+            return _with_response_seal("念痕没有修改：deltas_json 必须是 JSON 对象。")
+    try:
+        result = await xinchao_service.update_thought_trace(
+            source_id,
+            raw_text,
+            tag=tag,
+            tone=tone,
+            intensity=intensity,
+            reason=reason,
+            deltas=deltas,
+            source_ref=_active_mcp_session_key(),
+        )
+    except Exception as error:
+        logger.warning("Private thought trace update failed: %s", error)
+        return _with_response_seal("念痕暂时没有修改，原有念痕和情绪状态没有被改动。")
+    if result.get("status") != "updated":
+        return _with_response_seal(
+            f"念痕未修改：{result.get('reason', result.get('status', '未知原因'))}"
+        )
+    await behavior_service.store.cancel_for_activity(
+        result.get("previous_cycle_id", result.get("cycle_id", 0))
+    )
+    thought = result.get("thought") or {}
+    link_note = (
+        "情绪联动已按新内容重新计算。"
+        if result.get("correction")
+        else "正文已修改，本次情绪联动数值没有变化。"
+    )
+    if result.get("linkage_pending"):
+        link_note = "正文已修改；情绪联动判断暂时不可用，保留原有联动数值。"
+    return _with_response_seal(
+        "已修改这条念痕（仅当前 AI 可修改；网页和 DeepSeek 只读）。\n"
+        f"标识：{thought.get('canonical_tag', source_id)}\n"
+        f"想法：{thought.get('thought_text', raw_text)}\n"
+        f"{link_note}"
+    )
 
 
 @mcp.tool()
@@ -2855,7 +3000,10 @@ async def inner_state() -> str:
         text = str(item.get("thought_text") or "").strip()
         if not text:
             continue
-        kind = "执念" if item.get("status") == "obsession" else "闪念"
+        if item.get("thought_kind") == "trace":
+            kind = "念痕"
+        else:
+            kind = "执念" if item.get("status") == "obsession" else "闪念"
         strength = float(item.get("current_strength", item.get("intensity", 0.0)))
         count = max(1, int(item.get("occurrence_count", 1)))
         line = f"- [{kind}｜强度 {strength:.2f}｜出现 {count} 次] {text}"
@@ -2866,6 +3014,8 @@ async def inner_state() -> str:
             line += f"\n  最近出现: {item['last_seen']}"
         thought_lines.append(line)
     if thought_lines:
+        # Keep the legacy section title for existing readers; each line still
+        # identifies trace records explicitly as “念痕”.
         sections.append("【心念】\n" + "\n".join(thought_lines))
 
     resonance_lines = []
@@ -2914,17 +3064,21 @@ async def inner_state() -> str:
 
 @mcp.tool()
 async def heartbeat(event_id: str = "") -> str:
-    """heartbeat presence alive 无正文报到，不开启静默或暗涌计时"""
+    """heartbeat presence alive 无正文报到；结束旧沉默并从此刻重新计时"""
     result = await xinchao_service.observe_presence(
         session_id=_active_mcp_session_key(),
         source="mcp:heartbeat",
         event_id=event_id or _active_mcp_event_key(),
         start_cycle=False,
+        interrupt_silence=True,
+    )
+    await behavior_service.store.cancel_for_activity(
+        result.get("previous_cycle_id", result.get("cycle_id", 0))
     )
     return _with_response_seal(
         "已记录仍在当前窗口，未读取或写入任何记忆正文。\n"
         f"时间（UTC+8）：{beijing_now().isoformat(timespec='seconds')}\n"
-        "状态：仅记录当前窗口仍在，不影响激素、心念、静默或暗涌。"
+        "状态：旧沉默计时与未交付产物已结束；若本轮已有写入，将从此刻重新计时。"
     )
 
 
@@ -3181,6 +3335,12 @@ async def timeline(
         return _with_response_seal("事实时间线写入失败，原记忆桶未受影响。")
 
     status = "记录没有变化" if saved["status"] == "unchanged" else "已记录"
+    if saved["status"] != "unchanged":
+        await _record_xinchao_event(
+            f"我确认了一条事实变化：{fact_label}，现在是“{fact_value}”。",
+            "timeline",
+            str(saved.get("version_id") or saved.get("fact_key") or fact_label),
+        )
     body = f"{status}：{fact_label}\n{_render_fact_timeline(visible).lstrip()}"
     return _with_response_seal(body)
 
@@ -3191,7 +3351,7 @@ async def _living_memory_coordinates(bucket_id: str) -> dict:
         raise ValueError("没有找到这个记忆桶。")
     metadata = bucket.get("metadata") or {}
     if metadata.get("sealed", False):
-        raise PermissionError("封存桶需要先在 recall 中明确授权，五维坐标不会旁路暴露。")
+        raise PermissionError("封存桶需要先在 recall 中明确授权，单条认知脉络不会旁路暴露。")
     relations, facts, topic = await asyncio.gather(
         relation_store.related_details(bucket["id"]),
         fact_timeline_store.versions_for_bucket(bucket["id"]),
@@ -3218,16 +3378,16 @@ async def _living_memory_coordinates(bucket_id: str) -> dict:
 
 @mcp.tool()
 async def living_memory(bucket_id: str) -> str:
-    """living_memory LMC-5 coordinates timeline relation fact emotion metabolism 读取单桶五维活体坐标"""
+    """living_memory cognitive threads timeline relation fact emotion metabolism 读取单条记忆的认知脉络"""
     try:
         coordinates = await _living_memory_coordinates(bucket_id)
     except (ValueError, PermissionError) as error:
         return _with_response_seal(str(error))
     except Exception as error:
         logger.error("Living memory coordinates failed for %s: %s", bucket_id, error)
-        return _with_response_seal("五维活体坐标暂时无法生成，原记忆未受影响。")
+        return _with_response_seal("单条认知脉络暂时无法生成，原记忆未受影响。")
     lines = [
-        f"=== LMC-5｜bucket_id: {coordinates['bucket_id']} ===",
+        f"=== 单条认知脉络｜bucket_id: {coordinates['bucket_id']} ===",
         f"完整度: {float(coordinates.get('completeness', 0)):.0%}",
         "精确坐标: " + json.dumps(coordinates.get("coordinate", {}), ensure_ascii=False),
         "X 时间线: " + json.dumps(coordinates["X"], ensure_ascii=False),
@@ -3241,30 +3401,68 @@ async def living_memory(bucket_id: str) -> str:
 
 
 @mcp.tool()
-async def personality_preview(days: int = 30) -> str:
-    """personality_preview personality trajectory long-term patterns 查看长期人格轨迹;只读不改写"""
+async def brain_context(query: str = "", limit: int = 6) -> str:
+    """brain_context external brain cognitive threads 跨记忆信箱念痕未竟事实读取认知脉络;只读"""
     try:
-        report = await xinchao_service.personality_preview(days)
+        context = await build_brain_context(
+            query,
+            bucket_manager=bucket_mgr,
+            mailbox_store=mailbox_store,
+            xinchao_service=xinchao_service,
+            task_service=task_service,
+            fact_timeline_store=fact_timeline_store,
+            limit=limit,
+        )
+    except Exception as error:
+        logger.error("Brain context read failed: %s", error)
+        return _with_response_seal("外置大脑的认知脉络暂时无法读取，原始内容未受影响。")
+    return _with_response_seal(
+        "【外置大脑｜认知脉络】\n"
+        + json.dumps(context, ensure_ascii=False, indent=2)
+    )
+
+
+@mcp.tool()
+async def personality_preview(days: int = 30) -> str:
+    """personality_preview compatibility alias for 性格轨迹;只读不改写，不修改固定人格。"""
+    try:
+        report = await xinchao_service.disposition_preview(days)
     except Exception as error:
         logger.error("Personality trajectory failed: %s", error)
         return _with_response_seal("人格轨迹暂时无法读取。")
-    if not report.get("suggestions") and not report.get("recurring_thoughts"):
+    if not report.get("tendencies"):
         return _with_response_seal("目前还没有形成足够稳定的人格轨迹。")
     return _with_response_seal(
-        "【人格轨迹｜只读观察】\n"
+        "【性格轨迹｜只读观察】\n"
+        + json.dumps(report, ensure_ascii=False, indent=2)
+    )
+
+
+@mcp.tool()
+async def disposition_preview(days: int = 30) -> str:
+    """disposition_preview 性格轨迹 behavior tendencies 读取长期行为倾向;不改写念痕和固定人格"""
+    try:
+        report = await xinchao_service.disposition_preview(days)
+    except Exception as error:
+        logger.error("Disposition trajectory failed: %s", error)
+        return _with_response_seal("性格轨迹暂时无法读取。")
+    if not report.get("tendencies"):
+        return _with_response_seal("目前还没有形成足够稳定的性格轨迹。")
+    return _with_response_seal(
+        "【性格轨迹｜行为参考，不是固定人格】\n"
         + json.dumps(report, ensure_ascii=False, indent=2)
     )
 
 
 @mcp.tool()
 async def self_state(days: int = 30) -> str:
-    """self_state identity personality emotion thoughts 查看自己当前状态与一段时间形成的人格轨迹;只读"""
+    """self_state identity disposition emotion thoughts 查看自己当前状态与性格轨迹;只读"""
     safe_days = max(7, min(365, int(days)))
     try:
         state, thoughts, trajectory = await asyncio.gather(
             xinchao_service.status(),
             xinchao_service.list_private_thoughts(status="active", limit=8),
-            xinchao_service.personality_preview(safe_days),
+            xinchao_service.disposition_preview(safe_days),
         )
     except Exception as error:
         logger.error("Self state read failed: %s", error)
@@ -3287,29 +3485,23 @@ async def self_state(days: int = 30) -> str:
     if thought_lines:
         sections.append("【心念】\n" + "\n".join(thought_lines))
 
-    patterns = list(trajectory.get("patterns") or trajectory.get("suggestions") or [])
-    recurring = list(trajectory.get("recurring_thoughts") or [])
+    tendencies = list(trajectory.get("tendencies") or [])
     trajectory_lines = []
-    for item in patterns[:6]:
+    for item in tendencies[:8]:
         trajectory_lines.append(
-            f"- {item.get('pattern') or '未命名倾向'}｜"
+            f"- {item.get('label') or '未命名倾向'}｜"
             f"出现 {int(item.get('evidence_count', 0))} 次｜"
+            f"强度 {float(item.get('strength', 0.0)):.2f}｜"
             f"最近 {item.get('last_seen') or '未知'}"
-        )
-    for item in recurring[:4]:
-        label = str(item.get("event_tag") or "反复心念").strip()
-        trajectory_lines.append(
-            f"- {label}｜反复 {int(item.get('occurrence_count', 0))} 次｜"
-            f"状态 {item.get('status') or '未知'}"
         )
     if trajectory_lines:
         sections.append(
-            f"【近 {safe_days} 天的人格轨迹】\n" + "\n".join(trajectory_lines)
+            f"【近 {safe_days} 天的性格轨迹】\n" + "\n".join(trajectory_lines)
         )
 
     sections.append(
-        "这些内容用于理解自己当前在哪里、长期往哪里走；读取不会清空状态，"
-        "也不会自动改写人格设定或记忆正文。"
+        "这些内容用于理解自己当前在哪里、长期往哪里走；性格轨迹只作为相似情境下的软参考，"
+        "读取不会清空状态，也不会自动改写固定人格、念痕或记忆正文。"
     )
     return _with_response_seal("\n\n".join(sections))
 
@@ -3766,6 +3958,12 @@ async def treasury(
                 source="mcp:treasury",
             )
             kind = "收入" if normalized_action == "income" else "支出"
+            await _record_xinchao_event(
+                f"我在小金库记下了一笔{kind}：{result['entry'].get('reason') or reason}。",
+                "treasury",
+                str(result["entry"].get("entry_id") or ""),
+                correction_key=f"treasury:{result['entry'].get('entry_id') or ''}",
+            )
             return _with_response_seal(
                 f"{kind}已记入小金库。\n"
                 f"{format_entry(result['entry'])}\n\n"
@@ -3846,6 +4044,12 @@ async def treasury(
             amount=proposed_amount,
             reason=proposed_reason,
             occurred_at=proposed_time,
+        )
+        await _record_xinchao_event(
+            f"我修改了一笔小金库记录：{result['entry'].get('reason') or proposed_reason}。",
+            "treasury",
+            str(entry_id),
+            correction_key=f"treasury:{entry_id}",
         )
         return _with_response_seal(
             f"账目 #{entry_id} 已修改，修改前完整记录已保存。\n"

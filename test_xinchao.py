@@ -142,6 +142,16 @@ class PrivateThoughtDarkflowEvaluator(PrivateThoughtEvaluator):
         return {"text": "这条没说出口的心念仍在影响我。", "aftereffect": {}}
 
 
+class TraceEffectEvaluator(FakeEvaluator):
+    def __init__(self):
+        super().__init__()
+        self.trace_inputs = []
+
+    async def evaluate_trace_effect(self, content):
+        self.trace_inputs.append(content)
+        return {"pipes": {"想靠近": 0.22, "开心": 0.08}, "text": "不得写回正文"}
+
+
 def config(root, **overrides):
     settings = {
         "enabled": True,
@@ -257,6 +267,31 @@ class XinchaoEngineTests(unittest.TestCase):
         self.assertLess(result["难过"], result["自省"])
         self.assertGreater(result["生气"], 0.0)
 
+    def test_high_drive_pipes_ebb_toward_their_baselines(self):
+        engine = XinchaoEngine(
+            {
+                "xinchao": {
+                    "step_minutes": 10,
+                    "baseline": {"想靠近": 0.18, "性欲": 0.15},
+                }
+            }
+        )
+        start = datetime(2026, 8, 1, 8, 0, tzinfo=BEIJING_TIMEZONE)
+        pipes = empty_pipes()
+        pipes.update({"想靠近": 0.9, "性欲": 0.9, "想知道她在干嘛": 0.9})
+        result = engine.evolve(
+            pipes,
+            start,
+            start + timedelta(hours=12),
+            floors=engine.baseline_pipes(),
+        )
+
+        self.assertLess(result["想靠近"], 0.9)
+        self.assertLess(result["性欲"], 0.9)
+        self.assertLess(result["想知道她在干嘛"], 0.9)
+        self.assertGreaterEqual(result["想靠近"], 0.18)
+        self.assertGreaterEqual(result["性欲"], 0.15)
+
     def test_negative_values_are_bounded(self):
         engine = XinchaoEngine({"xinchao": {"negative_cap": 0.85}})
         result = engine.apply_event(empty_pipes(), {"生气": 0.8, "难过": 0.8})
@@ -293,20 +328,6 @@ class XinchaoEngineTests(unittest.TestCase):
         )
         self.assertLess(result["想靠近"], awake_only["想靠近"])
         self.assertLess(result["生气"], pipes["生气"])
-
-    def test_satisfaction_plateau_pauses_only_the_named_drive(self):
-        engine = XinchaoEngine({"xinchao": {"step_minutes": 10}})
-        start = datetime(2026, 8, 1, 8, 0, tzinfo=BEIJING_TIMEZONE)
-        pipes = empty_pipes()
-        pipes.update({"想靠近": 0.2, "想分享": 0.2})
-        result = engine.evolve(
-            pipes,
-            start,
-            start + timedelta(hours=2),
-            plateaus={"想靠近": start + timedelta(hours=3)},
-        )
-        self.assertEqual(result["想靠近"], pipes["想靠近"])
-        self.assertGreater(result["想分享"], pipes["想分享"])
 
     def test_concurrent_schema_initialization_is_idempotent(self):
         with tempfile.TemporaryDirectory() as root:
@@ -348,7 +369,103 @@ class XinchaoServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(settled["status"], "waiting")
         self.assertEqual(settled["phase"], "active")
 
-    async def test_explicit_handoff_arms_static_countdown(self):
+    async def test_last_presence_controls_absence_boundary_and_resets_on_activity(self):
+        with tempfile.TemporaryDirectory() as root:
+            service = XinchaoService(config(root, monologue_enabled=True))
+            service.evaluator = FakeEvaluator(handoff_ready=False)
+            await service.record_event("写下一件需要等待的事。", "hold", "a")
+            old_stamp = (
+                datetime.now(BEIJING_TIMEZONE) - timedelta(minutes=31)
+            ).isoformat(timespec="seconds")
+            with sqlite3.connect(service.db_path) as connection:
+                connection.execute(
+                    "UPDATE xinchao_state SET last_event_at=?, last_presence_at=? "
+                    "WHERE state_id=1",
+                    (old_stamp, old_stamp),
+                )
+
+            absent = await service.status()
+            self.assertTrue(absent["static_ready"])
+            self.assertEqual(absent["interaction_phase"], "absence")
+            self.assertGreaterEqual(absent["inactivity_seconds"], 30 * 60)
+
+            observed = await service.observe_presence(
+                session_id="session-a",
+                source="mcp:heartbeat",
+                event_id="turn-b",
+            )
+            active = await service.status()
+            waiting = await service.settle_darkflow()
+
+        self.assertEqual(observed["status"], "observed")
+        self.assertFalse(active["static_ready"])
+        self.assertEqual(active["interaction_phase"], "active")
+        self.assertEqual(waiting["status"], "waiting")
+        self.assertEqual(waiting["phase"], "active")
+
+    async def test_real_tool_activity_discards_absence_outputs_and_starts_clean_cycle(self):
+        with tempfile.TemporaryDirectory() as root:
+            service = XinchaoService(config(root, monologue_enabled=True))
+            service.evaluator = FakeEvaluator(handoff_ready=False)
+            await service.record_event("写下一件完整的事和当时感受。", "hold", "old")
+            old_stamp = (
+                datetime.now(BEIJING_TIMEZONE) - timedelta(minutes=91)
+            ).isoformat(timespec="seconds")
+            with sqlite3.connect(service.db_path) as connection:
+                connection.execute(
+                    "UPDATE xinchao_state SET last_event_at=?, last_presence_at=? "
+                    "WHERE state_id=1",
+                    (old_stamp, old_stamp),
+                )
+            generated = await service.settle_darkflow()
+            before = await service.status()
+            self.assertEqual(generated["status"], "updated")
+            self.assertIsNotNone(await service.pending_darkflow())
+
+            observed = await service.observe_presence(
+                session_id="session-action",
+                source="mcp:recall",
+                event_id="tool-call-2",
+                interrupt_silence=True,
+            )
+            after = await service.status()
+            pending_after = await service.pending_darkflow()
+
+        self.assertTrue(observed["new_cycle_started"])
+        self.assertTrue(observed["discarded_darkflow"])
+        self.assertEqual(observed["previous_cycle_id"], before["cycle_id"])
+        self.assertEqual(after["cycle_id"], before["cycle_id"] + 1)
+        self.assertEqual(after["interaction_phase"], "active")
+        self.assertFalse(after["static_ready"])
+        self.assertEqual(after["darkflow_stage"], 0)
+        self.assertEqual(after["pipes"], service._baseline_floors())
+        self.assertIsNone(pending_after)
+
+    async def test_delivery_closes_cycle_and_restores_configured_baseline(self):
+        with tempfile.TemporaryDirectory() as root:
+            service = XinchaoService(config(root, monologue_enabled=True))
+            service.evaluator = FakeEvaluator(handoff_ready=False)
+            event = await service.record_event("写下一件完整的事和感受。", "hold", "a")
+            old_stamp = (
+                datetime.now(BEIJING_TIMEZONE) - timedelta(minutes=91)
+            ).isoformat(timespec="seconds")
+            with sqlite3.connect(service.db_path) as connection:
+                connection.execute(
+                    "UPDATE xinchao_state SET last_event_at=?, last_presence_at=? "
+                    "WHERE state_id=1",
+                    (old_stamp, old_stamp),
+                )
+            generated = await service.settle_darkflow()
+            delivered = await service.mark_darkflow_delivered(event["cycle_id"])
+            settled = await service.status()
+
+        self.assertEqual(generated["status"], "updated")
+        self.assertTrue(delivered)
+        self.assertFalse(settled["cycle_open"])
+        self.assertTrue(settled["repeated"])
+        self.assertEqual(settled["pipes"], service._baseline_floors())
+
+    async def test_explicit_handoff_does_not_bypass_inactivity_boundary(self):
         with tempfile.TemporaryDirectory() as root:
             service = XinchaoService(config(root, monologue_enabled=True))
             service.evaluator = FakeEvaluator(tag="窗口收尾", handoff_ready=True)
@@ -360,9 +477,9 @@ class XinchaoServiceTests(unittest.IsolatedAsyncioTestCase):
             state = await service.status()
 
         self.assertTrue(recorded["handoff_ready"])
-        self.assertTrue(state["static_ready"])
-        self.assertEqual(state["interaction_phase"], "absence")
-        self.assertIsNotNone(state["static_started_at"])
+        self.assertFalse(state["static_ready"])
+        self.assertEqual(state["interaction_phase"], "active")
+        self.assertEqual(state["silence_to_absence_seconds"], 1800)
 
     async def test_heartbeat_does_not_open_cycle_or_generate_darkflow(self):
         with tempfile.TemporaryDirectory() as root:
@@ -437,6 +554,122 @@ class XinchaoServiceTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(len(await service.list_private_thoughts("resolved")), 1)
 
+    async def test_thought_trace_preserves_ai_text_and_uses_effect_only_linkage(self):
+        with tempfile.TemporaryDirectory() as root:
+            service = XinchaoService(config(root))
+            evaluator = TraceEffectEvaluator()
+            service.evaluator = evaluator
+            original = "我现在有一点不体面的想法，但我只想把它留在这里。\n  原样保留。"
+            result = await service.record_thought_trace(
+                original,
+                tag="不体面但私密",
+                source_ref="session-1",
+            )
+            traces = await service.list_private_thoughts("all", kind="trace")
+            found = await service.search_private_thoughts("不体面的想法", kind="trace")
+            with sqlite3.connect(service.db_path) as connection:
+                event_count = connection.execute(
+                    "SELECT COUNT(*) FROM xinchao_events"
+                ).fetchone()[0]
+
+        self.assertEqual(result["status"], "recorded")
+        self.assertEqual(len(evaluator.trace_inputs), 1)
+        self.assertEqual(evaluator.trace_inputs[0], original)
+        self.assertEqual(len(traces), 1)
+        self.assertEqual(traces[0]["thought_text"], original)
+        self.assertEqual(traces[0]["thought_kind"], "trace")
+        self.assertTrue(traces[0]["read_only_from_manager"])
+        self.assertEqual(traces[0]["source_tool"], "mcp:thought_trace")
+        self.assertTrue(found)
+        self.assertEqual(event_count, 0)
+
+    async def test_explicit_trace_deltas_do_not_call_deepseek_effect_judge(self):
+        with tempfile.TemporaryDirectory() as root:
+            service = XinchaoService(config(root))
+            evaluator = TraceEffectEvaluator()
+            service.evaluator = evaluator
+            result = await service.record_thought_trace(
+                "这条正文由当前使用的 AI 原样写入。",
+                deltas={"难过": 0.3},
+            )
+
+        self.assertEqual(result["status"], "recorded")
+        self.assertEqual(result["deltas"], {"难过": 0.3})
+        self.assertEqual(evaluator.trace_inputs, [])
+
+    async def test_current_ai_can_update_trace_and_revision_is_kept(self):
+        with tempfile.TemporaryDirectory() as root:
+            service = XinchaoService(config(root))
+            evaluator = TraceEffectEvaluator()
+            service.evaluator = evaluator
+            created = await service.record_thought_trace(
+                "第一版念痕，原文由当前 AI 写入。",
+                tag="当前想法",
+                deltas={"想靠近": 0.20},
+            )
+            canonical_tag = created["thought"]["canonical_tag"]
+            updated = await service.update_thought_trace(
+                canonical_tag,
+                "修改后的念痕，仍然只由当前 AI 修改。",
+                deltas={"难过": 0.18},
+                source_ref="session-2",
+            )
+            traces = await service.list_private_thoughts("all", kind="trace")
+            with sqlite3.connect(service.db_path) as connection:
+                revisions = connection.execute(
+                    "SELECT old_text, new_text FROM xinchao_trace_revisions"
+                ).fetchall()
+
+        self.assertEqual(updated["status"], "updated")
+        self.assertEqual(len(traces), 1)
+        self.assertEqual(traces[0]["thought_text"], "修改后的念痕，仍然只由当前 AI 修改。")
+        self.assertEqual(len(revisions), 1)
+        self.assertEqual(revisions[0][0], "第一版念痕，原文由当前 AI 写入。")
+        self.assertEqual(revisions[0][1], "修改后的念痕，仍然只由当前 AI 修改。")
+        self.assertEqual(evaluator.trace_inputs, [])
+
+    async def test_disposition_is_separate_soft_context_from_private_trace(self):
+        with tempfile.TemporaryDirectory() as root:
+            service = XinchaoService(config(root))
+            await service.record_thought_trace(
+                "第一条私密想法。", tag="担心", deltas={"难过": 0.1}
+            )
+            await service.record_thought_trace(
+                "第二条私密想法。", tag="担心", deltas={"难过": 0.1}
+            )
+            report = await service.disposition_preview(30)
+            context = await service.behavior_tendency_context(30)
+
+        self.assertEqual(report["name"], "性格轨迹")
+        self.assertTrue(report["tendencies"])
+        self.assertTrue(any(item["kind"] == "private_thought_pattern" for item in report["tendencies"]))
+        self.assertEqual(context["mode"], "soft_context_only")
+        self.assertTrue(context["tendencies"])
+        self.assertNotIn("第一条私密想法。", json.dumps(context, ensure_ascii=False))
+
+    async def test_legacy_generic_trace_tag_does_not_become_a_disposition(self):
+        with tempfile.TemporaryDirectory() as root:
+            service = XinchaoService(config(root))
+            now = datetime.now(BEIJING_TIMEZONE).isoformat(timespec="seconds")
+            with sqlite3.connect(service.db_path) as connection:
+                for index in range(2):
+                    connection.execute(
+                        """
+                        INSERT INTO xinchao_events (
+                            created_at, source_tool, source_ref, fingerprint,
+                            event_summary, event_tag, status, processed_at
+                        ) VALUES (?, 'legacy', ?, ?, ?, '念痕', 'applied', ?)
+                        """,
+                        (now, f"legacy-{index}", f"legacy-fingerprint-{index}",
+                         f"旧版泛化念痕 {index}", now),
+                    )
+                connection.commit()
+            report = await service.disposition_preview(30)
+
+        self.assertEqual(report["patterns"], [])
+        self.assertEqual(report["tendencies"], [])
+        self.assertEqual((report.get("tendency") or {}).get("name", ""), "")
+
     async def test_default_darkflow_stages_end_at_twelve_hours(self):
         with tempfile.TemporaryDirectory() as root:
             service = XinchaoService(
@@ -458,6 +691,39 @@ class XinchaoServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(service._target_stage(30 * 60, "presence"), 0)
         self.assertEqual(service._target_stage(60 * 60, "presence"), 1)
         self.assertEqual(service._target_stage(30 * 60, "event"), 0)
+        self.assertEqual(service._target_stage(60 * 60, "event"), 1)
+
+    async def test_event_needs_thirty_minutes_quiet_then_one_hour_absence(self):
+        with tempfile.TemporaryDirectory() as root:
+            service = XinchaoService(config(root, monologue_enabled=True))
+            service.evaluator = FakeEvaluator(handoff_ready=False)
+            event = await service.record_event("写入一件需要等待的事。", "hold", "a")
+
+            def backdate(minutes):
+                stamp = (
+                    datetime.now(BEIJING_TIMEZONE) - timedelta(minutes=minutes)
+                ).isoformat(timespec="seconds")
+                with sqlite3.connect(service.db_path) as connection:
+                    connection.execute(
+                        "UPDATE xinchao_state SET last_event_at=?, last_presence_at=? "
+                        "WHERE state_id=1",
+                        (stamp, stamp),
+                    )
+
+            backdate(31)
+            first = await service.status()
+            first_settle = await service.settle_darkflow()
+            backdate(91)
+            second = await service.status()
+            second_settle = await service.settle_darkflow()
+
+        self.assertTrue(first["static_ready"])
+        self.assertEqual(first["interaction_phase"], "absence")
+        self.assertEqual(first["elapsed_seconds"], 60)
+        self.assertEqual(first_settle["status"], "waiting")
+        self.assertEqual(second["elapsed_seconds"], 3660)
+        self.assertEqual(second_settle["status"], "updated")
+        self.assertEqual(second_settle["stage_index"], 1)
 
     async def test_presence_alone_never_starts_legacy_half_hour_darkflow(self):
         with tempfile.TemporaryDirectory() as root:
@@ -580,11 +846,6 @@ class XinchaoServiceTests(unittest.IsolatedAsyncioTestCase):
                 "我写下完整事件和自己的感受。", "hold", "a"
             )
             before = await service.status()
-            deferred = await service.apply_behavior_feedback(
-                event["cycle_id"],
-                "我想你了。",
-                {"想靠近": 0.8, "想分享": -0.8, "非法状态": 0.5},
-            )
             applied = await service.apply_behavior_feedback(
                 event["cycle_id"],
                 "我想你了。",
@@ -593,11 +854,9 @@ class XinchaoServiceTests(unittest.IsolatedAsyncioTestCase):
             after = await service.status()
             transitions = await service.recent_transitions()
 
-        self.assertEqual(deferred["status"], "deferred")
-        self.assertEqual(deferred["deltas"], {})
-        self.assertEqual(applied["deltas"], {"想靠近": 0.02, "想分享": -0.02})
-        self.assertLessEqual(after["pipes"]["想靠近"] - before["pipes"]["想靠近"], 0.0201)
-        self.assertLessEqual(before["pipes"]["想分享"] - after["pipes"]["想分享"], 0.0201)
+        self.assertEqual(applied["deltas"], {"想靠近": 0.05, "想分享": -0.05})
+        self.assertLessEqual(after["pipes"]["想靠近"] - before["pipes"]["想靠近"], 0.0501)
+        self.assertLessEqual(before["pipes"]["想分享"] - after["pipes"]["想分享"], 0.0501)
         self.assertEqual(transitions[0]["transition_type"], "behavior_feedback_applied")
         self.assertNotIn("我想你了", json.dumps(transitions, ensure_ascii=False))
 
@@ -697,7 +956,9 @@ class XinchaoServiceTests(unittest.IsolatedAsyncioTestCase):
             )
 
             async def set_absence(hours):
-                moment = datetime.now(BEIJING_TIMEZONE) - timedelta(hours=hours)
+                moment = datetime.now(BEIJING_TIMEZONE) - timedelta(
+                    hours=hours + service.silence_to_absence_hours
+                )
                 with sqlite3.connect(service.db_path) as connection:
                     connection.execute(
                         "UPDATE xinchao_state SET last_event_at=?, last_presence_at=?, "
@@ -907,17 +1168,12 @@ class XinchaoServiceTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(after["interaction_phase"], "active")
             self.assertFalse(after["static_ready"])
             self.assertIsNone(result["silence_started_at"])
-            self.assertTrue(result["pending_darkflow_carried"])
-            self.assertIsNotNone(darkflow_after)
-            self.assertEqual(darkflow_after["cycle_id"], after["cycle_id"])
-            self.assertEqual(darkflow_after["content"], darkflow_before["content"])
-            self.assertEqual(darkflow_after["status"], "pending")
-            self.assertGreater(after["pipes"]["想靠近"], 0.18)
-            self.assertLess(after["pipes"]["想靠近"], before["pipes"]["想靠近"])
-            self.assertGreater(after["pipes"]["想黏着"], 0.12)
-            self.assertLess(after["pipes"]["想黏着"], before["pipes"]["想黏着"])
-            self.assertEqual(after["pipes"]["性欲"], 0.60)
-            self.assertEqual(after["pipes"]["生气"], 0.55)
+            self.assertFalse(result["pending_darkflow_carried"])
+            self.assertIsNone(darkflow_after)
+            self.assertEqual(after["pipes"]["想靠近"], 0.18)
+            self.assertEqual(after["pipes"]["想黏着"], 0.12)
+            self.assertEqual(after["pipes"]["性欲"], 0.15)
+            self.assertEqual(after["pipes"]["生气"], 0.0)
             self.assertEqual(after["pipes"]["开心"], 0.04)
             self.assertEqual(after["pipes"]["满足"], 0.06)
             with sqlite3.connect(service.db_path) as connection:
@@ -983,6 +1239,12 @@ class XinchaoServiceTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsNotNone(await service.pending_darkflow())
 
             before = await service.status()
+            with sqlite3.connect(service.db_path) as connection:
+                old_pipes = {name: 0.9 for name in empty_pipes()}
+                connection.execute(
+                    "UPDATE xinchao_state SET static_ready=1, pipes_json=? WHERE state_id=1",
+                    (json.dumps(old_pipes, ensure_ascii=False),),
+                )
             service.evaluator = FakeEvaluator(tag="第二轮", handoff_ready=False)
             result = await service.record_event(
                 "后来又写进一件新事，这才是现在最新的交接。", "mailbox", "b"
@@ -996,6 +1258,7 @@ class XinchaoServiceTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(after["static_ready"])
             self.assertEqual(after["darkflow_stage"], 0)
             self.assertGreaterEqual(after["cycle_id"], before["cycle_id"] + 1)
+            self.assertLess(after["pipes"]["想靠近"], 0.70)
 
     async def test_mailbox_can_seed_time_based_darkflow_without_duplicate_event(self):
         with tempfile.TemporaryDirectory() as root:

@@ -93,11 +93,50 @@ def config(root, mode="rehearsal"):
             "enabled": True,
             "mode": mode,
             "max_chars": 80,
+            # Keep general behavior tests independent from the wall clock.
+            # The dedicated quiet-hours test overrides these values explicitly.
+            "quiet_start": "00:00",
+            "quiet_end": "00:00",
         },
     }
 
 
 class BehaviorServiceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_behavior_decision_receives_separate_soft_tendency_context(self):
+        with tempfile.TemporaryDirectory() as root:
+            evaluator = LongingBehaviorEvaluator()
+            service = BehaviorService(config(root), evaluator)
+
+            async def tendencies():
+                return {
+                    "name": "性格轨迹",
+                    "mode": "soft_context_only",
+                    "tendencies": [
+                        {
+                            "label": "遇到沉默时更容易担心",
+                            "strength": 0.7,
+                            "behavior_rule": "只影响相似情境下的语气和时机",
+                        }
+                    ],
+                }
+
+            service.set_tendency_provider(tendencies)
+            result = await service.process(
+                {"cycle_id": 91, "stage_index": 1, "content": "我有点想她。"},
+                {"pipes": {"想靠近": 0.7}, "dominant": "想靠近"},
+                None,
+            )
+
+        self.assertEqual(result["status"], "rehearsal")
+        self.assertEqual(len(evaluator.calls), 1)
+        self.assertEqual(
+            evaluator.calls[0]["tendency_context"]["name"], "性格轨迹"
+        )
+        self.assertEqual(
+            evaluator.calls[0]["tendency_context"]["tendencies"][0]["label"],
+            "遇到沉默时更容易担心",
+        )
+
     async def test_beijing_night_quiet_does_not_generate_or_record_a_push(self):
         with tempfile.TemporaryDirectory() as root:
             settings = config(root)
@@ -255,15 +294,14 @@ class BehaviorServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["status"], "rehearsal")
         self.assertIsNone(evaluator.calls[0]["mailbox_context"])
         self.assertTrue(evaluator.calls[0]["timing"]["presence_only"])
-        self.assertFalse(evaluator.calls[0]["timing"]["first_silence_nudge"])
-        self.assertEqual(evaluator.calls[0]["timing"]["interaction_phase"], "absence")
+        self.assertTrue(evaluator.calls[0]["timing"]["first_silence_nudge"])
 
     async def test_mailbox_departure_waits_instead_of_using_a_fixed_fallback(self):
         with tempfile.TemporaryDirectory() as root:
             evaluator = SkippingBehaviorEvaluator()
             service = BehaviorService(config(root), evaluator)
             contexts = [
-                {"context_card": "用户说她要出去了，刚准备出门，到了会再说。"}
+                {"context_card": "示例用户说她要出去了，刚准备出门，到了会再说。"}
             ]
             event = {
                 "status": "applied",
@@ -306,6 +344,39 @@ class BehaviorServiceTests(unittest.IsolatedAsyncioTestCase):
             evaluator.calls[0]["hormone_context"]["current_name"],
             "想知道她在干嘛",
         )
+
+    async def test_recheck_marker_is_passed_to_second_behavior_judgment(self):
+        with tempfile.TemporaryDirectory() as root:
+            evaluator = FakeBehaviorEvaluator()
+            service = BehaviorService(config(root), evaluator)
+            candidate = await service.store.upsert_candidate(
+                {
+                    "cycle_id": 22,
+                    "source_event_id": 52,
+                    "created_at": beijing_now().isoformat(timespec="seconds"),
+                    "due_at": (beijing_now() - timedelta(minutes=1)).isoformat(
+                        timespec="seconds"
+                    ),
+                    "expires_at": (beijing_now() + timedelta(hours=1)).isoformat(
+                        timespec="seconds"
+                    ),
+                    "status": "pending",
+                    "event_contexts": [{"context_card": "事情还没有结束。"}],
+                    "hormone_name": "想靠近",
+                    "hormone_drive": 0.8,
+                    "decision_note": "情绪驱动较高，保留一次到点复核：想靠近=0.80",
+                }
+            )
+            state = {
+                "cycle_id": 22,
+                "interaction_phase": "active",
+                "elapsed_seconds": 3600,
+                "pipes": {"想靠近": 0.8},
+                "event_contexts": [{"context_card": "事情还没有结束。"}],
+            }
+            await service.process_due(state, None, None)
+
+        self.assertTrue(evaluator.calls[0]["timing"]["schedule_recheck"])
 
     async def test_similar_recent_push_is_regenerated_once(self):
         with tempfile.TemporaryDirectory() as root:
@@ -445,7 +516,7 @@ class BehaviorServiceTests(unittest.IsolatedAsyncioTestCase):
                 "status": "applied",
                 "event_id": 42,
                 "cycle_id": 20,
-                "context_card": "用户已经到家了，事情结束了。",
+                "context_card": "示例用户已经到家了，事情结束了。",
             }
             state = {
                 "cycle_id": 20,
@@ -456,6 +527,27 @@ class BehaviorServiceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(scheduled["status"], "skipped")
         self.assertEqual(scheduled["item"]["follow_up_required"], 0)
+
+    async def test_high_emotion_event_gets_one_recheck_after_conservative_schedule_skip(self):
+        with tempfile.TemporaryDirectory() as root:
+            evaluator = SkippingBehaviorEvaluator()
+            service = BehaviorService(config(root), evaluator)
+            event = {
+                "status": "applied",
+                "event_id": 43,
+                "cycle_id": 20,
+                "context_card": "今天心里有点乱，但事情还没有结束。",
+            }
+            state = {
+                "cycle_id": 20,
+                "pipes": {"想靠近": 0.80},
+                "event_contexts": [{"context_card": event["context_card"]}],
+            }
+            scheduled = await service.schedule_event(event, state)
+
+        self.assertEqual(scheduled["status"], "pending")
+        self.assertEqual(scheduled["item"]["follow_up_required"], 0)
+        self.assertIn("保留一次到点复核", scheduled["item"]["decision_note"])
 
     async def test_event_candidate_is_scheduled_then_decided_without_darkflow(self):
         with tempfile.TemporaryDirectory() as root:
@@ -560,6 +652,54 @@ class BehaviorServiceTests(unittest.IsolatedAsyncioTestCase):
             "啧。\n突然特别想你。\n想得有点烦。",
             {"想靠近": 0.04, "想分享": -0.02},
         )
+
+    async def test_new_write_cancels_only_unsent_follow_up_material(self):
+        with tempfile.TemporaryDirectory() as root:
+            service = BehaviorService(config(root), FakeBehaviorEvaluator())
+            await service.store.upsert_candidate(
+                {
+                    "cycle_id": 11,
+                    "source_event_id": 101,
+                    "created_at": beijing_now().isoformat(timespec="seconds"),
+                    "due_at": beijing_now().isoformat(timespec="seconds"),
+                    "expires_at": (beijing_now() + timedelta(hours=1)).isoformat(
+                        timespec="seconds"
+                    ),
+                    "status": "pending",
+                    "event_contexts": [],
+                }
+            )
+            await service.store.record(
+                {
+                    "cycle_id": 11,
+                    "stage_index": 1,
+                    "action_type": "message",
+                    "content": "旧一轮还没发出的内容",
+                    "status": "rehearsal",
+                }
+            )
+            await service.store.record(
+                {
+                    "cycle_id": 11,
+                    "stage_index": 2,
+                    "action_type": "message",
+                    "content": "已经发出的内容",
+                    "status": "sent",
+                    "delivered_at": beijing_now().isoformat(timespec="seconds"),
+                }
+            )
+
+            result = await service.store.cancel_obsolete(12)
+            candidates = await service.store.list_candidates()
+            actions = await service.store.list()
+
+        self.assertEqual(result, {"candidates": 1, "actions": 1, "cycle_id": 12})
+        self.assertEqual(candidates[0]["status"], "cancelled")
+        by_stage = {item["stage_index"]: item for item in actions}
+        self.assertEqual(by_stage[1]["status"], "cancelled")
+        self.assertEqual(by_stage[1]["content"], "")
+        self.assertEqual(by_stage[2]["status"], "sent")
+        self.assertEqual(by_stage[2]["content"], "已经发出的内容")
 
 
 if __name__ == "__main__":

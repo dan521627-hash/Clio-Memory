@@ -202,7 +202,7 @@ class ProspectiveMemoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("bucket_id: future", result)
         self.assertNotIn("bucket_id: processed", result)
         self.assertNotIn("bucket_id: sealed", result)
-        self.assertTrue(result.endswith("\nseal: test-seal"))
+        self.assertNotIn("seal:", result)
 
     def test_public_signatures_only_append_optional_parameters(self):
         self.assertEqual(list(inspect.signature(server.hold).parameters)[-1], "trigger_date")

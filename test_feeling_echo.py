@@ -189,7 +189,7 @@ class FeelingEchoTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("【信箱最新留言】", first)
         self.assertIn("message_id: 18", second)
         self.assertIn("最新窗口总和", second)
-        self.assertTrue(first.endswith("\nseal: test-seal"))
+        self.assertNotIn("seal:", first)
 
     def test_tool_signatures_only_append_optional_parameters(self):
         self.assertEqual(

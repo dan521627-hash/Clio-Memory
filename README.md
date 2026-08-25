@@ -16,7 +16,7 @@ Clio 像一座由 AI 和使用者共同维护的记忆小屋：
 - **智能检索**同时理解关键词和相近意思。即使措辞不同，也能找到相关记忆。
 - **激素、心念、暗涌、共振与张力**不是生物学结论，而是一套可检查的状态模型：写入的事件会形成状态，状态会影响想起什么、明确交接后的静默期形成什么念头，以及可选的主动推送。
 - **记忆日历、事实时间线、未竟事项**让记忆不只按主题保存，也能按日期、事实变化和待办状态查找。
-- **LMC-5 五维坐标**让一条记忆同时拥有时间、关系、事实演化、情绪张力与代谢状态；这些坐标只辅助理解，不覆盖原文。
+- **心智经纬**让一条记忆同时带上时间、关系、事实演化、情绪张力与记忆代谢五条旁路证据；它帮助 AI 理解“这件事怎样经过大脑”，但绝不覆盖原文。
 - **安全层**负责写前快照、追加写入、冲突警告、封存、钉选、验真暗语和只演习不执行的自动整理。
 - **网页管理小屋**让不懂代码的人也能查看、修改、封存、删除、搜索和导出自己的记忆。
 
@@ -45,11 +45,13 @@ AI 写下一件事或一封信
 详细说明见：
 
 - [公开版更新记录](CHANGELOG.md)
+- [v1.4 更新说明与工作原理](RELEASE-NOTES-v1.4.md)
 - [完整功能与联动说明](docs/FEATURES-ZH.md)
 - [小白安装教程](docs/INSTALL-ZH.md)
 - [使用方式与常见问题](docs/FAQ-ZH.md)
 - [手机访问与消息推送](docs/PUSH-ZH.md)
 - [隐私与安全边界](docs/PRIVACY.md)
+- [作者与署名要求](NOTICE.md)
 - [技术架构](docs/ARCHITECTURE.md)
 
 ## 能在哪些设备上用
@@ -168,7 +170,7 @@ https://你的域名/mcp
 
 不同 AI 产品配置 MCP 的位置不同，但需要填写的是同一个完整 MCP 地址。客户端必须支持远程 MCP；仅支持本地命令型 MCP 的客户端需要额外桥接。
 
-建议把 [CLAUDE_PROMPT.md](CLAUDE_PROMPT.md) 中的使用规则加入客户端说明。`pulse_boot` 还会提供完整的 23 工具地图，包括按日期查询 `calendar`、事实变化 `timeline`、五维坐标 `living_memory` 和按需自查 `self_state`。
+建议把 [CLAUDE_PROMPT.md](CLAUDE_PROMPT.md) 中的使用规则加入客户端说明。`pulse_boot` 还会提供完整工具地图，包括按日期查询 `calendar`、事实变化 `timeline`、心智经纬 `living_memory` 和按需自查 `self_state`。
 
 ## 数据放在哪里
 
@@ -221,6 +223,9 @@ docker compose up -d --build
 
 ## 项目来源与许可证
 
-Clio Memory 基于 [P0lar1zzZ/Ombre-Brain](https://github.com/P0lar1zzZ/Ombre-Brain)（MIT License）改造。原始许可证保留在 [LICENSE](LICENSE) 中，修改后的代码继续按 MIT License 开放。
+Clio Memory 当前公开版本由 GitHub 用户 **dan521627-hash** 设计、改造并维护，基于
+[P0lar1zzZ/Ombre-Brain](https://github.com/P0lar1zzZ/Ombre-Brain)（MIT License）继续开发。
+原始许可证依法保留；使用、修改或再发布本项目时，还必须保留 **dan521627-hash** 的署名、
+项目链接和 [NOTICE.md](NOTICE.md)。
 
 English summary: Clio Memory is a self-hosted MCP memory, continuity, and inspectable state system. The Chinese documentation above is the primary user guide; code and configuration keys remain readable in English.

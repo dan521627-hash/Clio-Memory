@@ -132,12 +132,7 @@ class TaskService:
                 for item in candidates[: self.max_candidates]
             ],
         }
-        response = await self.evaluator.client.chat.completions.create(
-            model=self.evaluator.model,
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
+        system_prompt = (
                         "你从一段真实事件中维护未竟事项，不总结记忆。只抓有限、具体、以后能够明确判断"
                         "完成或未完成的行动，以及正在等待的明确结果。关系承诺、道歉后的表态、长期相处态度、"
                         "人格或行为准则、说话方式、情绪、愿望、流水账和已经当场结束的动作都不要建任务。"
@@ -153,17 +148,37 @@ class TaskService:
                         "\"completion_criterion\":\"怎样才算完成\",\"evidence\":\"原文依据\"}]}。"
                         "create 只允许 task_type 为 finite_action 或 waiting，且 completion_criterion 不能为空。"
                         "没有事项就返回空数组。"
-                    ),
-                },
-                {"role": "user", "content": json.dumps(context, ensure_ascii=False)},
-            ],
-            max_tokens=700,
-            temperature=0.1,
-            response_format={"type": "json_object"},
-            extra_body={"thinking": {"type": "disabled"}},
         )
-        raw = response.choices[0].message.content if response.choices else ""
-        payload = self.evaluator._clean_json(str(raw or ""))
+        payload = None
+        last_error = None
+        for attempt in range(2):
+            try:
+                messages = [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": json.dumps(context, ensure_ascii=False)},
+                ]
+                if attempt:
+                    messages.append(
+                        {
+                            "role": "system",
+                            "content": "上次返回无效。现在只返回严格 JSON 对象，不要任何说明。",
+                        }
+                    )
+                response = await self.evaluator.client.chat.completions.create(
+                    model=self.evaluator.model,
+                    messages=messages,
+                    max_tokens=700,
+                    temperature=0.1,
+                    response_format={"type": "json_object"},
+                    extra_body={"thinking": {"type": "disabled"}},
+                )
+                raw = response.choices[0].message.content if response.choices else ""
+                payload = self.evaluator._clean_json(str(raw or ""))
+                break
+            except Exception as error:
+                last_error = error
+        if payload is None:
+            raise last_error or ValueError("未竟提取没有返回有效 JSON")
         actions = payload.get("actions", [])
         return actions[:5] if isinstance(actions, list) else []
 
@@ -380,6 +395,10 @@ class TaskService:
         )
         await self._embed_item(item)
         return item
+
+    async def retract_source(self, source_type: str, source_ref: str) -> dict:
+        """Safely remove task derivations belonging to a corrected write."""
+        return await self.store.retract_source(source_type, source_ref)
 
     async def update_manual(self, task_id: int, **changes) -> dict:
         item = await self.store.update(task_id, manual=True, **changes)
