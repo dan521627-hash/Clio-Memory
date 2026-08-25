@@ -98,7 +98,7 @@ TRACE_EFFECT_PROMPT = """你是“激素”系统的联动判断器。你可以�
 
 你的输出只允许包含 signals：根据原文判断这条想法对状态的变化。每条 signal 包含 subject、scope、state、delta、evidence、confidence、reason；subject 只能是 ai，scope 只能是 current 或 recalled，evidence 必须逐字摘自原文。正数表示增加，负数表示释放；没有明确依据就返回空数组。每个变化绝对值不超过 0.4，总变化绝对值不超过 0.8。
 
-只能输出一个严格 JSON 对象：{"signals": [{"subject":"ai","scope":"current","state":"状态名","delta":0.1,"evidence":"原文短句","confidence":0.8,"reason":"简短区分理由"}]}
+只能输出一个严格 JSON 对象：{{"signals": [{{"subject":"ai","scope":"current","state":"状态名","delta":0.1,"evidence":"原文短句","confidence":0.8,"reason":"简短区分理由"}}]}}
 
 状态名只能从：{pipes} 中选择。先识别主体；排除用户或第三人的情绪；排除否定、引用和假设。相近状态逐项区分，不能从一个状态自动补出其他状态。不要输出 text、tag 或任何改写内容。不要代码块，不要解释。"""
 
@@ -114,7 +114,13 @@ class XinchaoEvaluator:
             settings.get("base_url")
             or api.get("base_url", "https://api.deepseek.com/v1")
         )
-        self.max_tokens = max(128, min(1024, int(settings.get("max_tokens", 512))))
+        # The evidence schema can legitimately contain several independently
+        # supported pipe signals. A 1024-token cap can truncate a real mailbox
+        # judgment before the closing brace and leave the write pending.
+        self.max_tokens = max(
+            2048,
+            min(4096, int(settings.get("max_tokens", api.get("max_tokens", 2048)))),
+        )
         self.judge_config_path = str(settings.get("judge_config_path", "") or "")
         self.default_baselines = self._safe_baselines(
             {"baselines": settings.get("baseline", DEFAULT_BASELINE_PIPES)}
@@ -318,7 +324,16 @@ class XinchaoEvaluator:
             except ValueError:
                 continue
             if isinstance(value, dict) and any(
-                key in value for key in ("event", "event_tag", "pipes")
+                key in value
+                for key in (
+                    "event",
+                    "event_tag",
+                    "pipes",
+                    "signals",
+                    "text",
+                    "action_type",
+                    "follow_up",
+                )
             ):
                 return value
         raise ValueError("evaluator response does not contain a valid JSON object")
@@ -604,7 +619,6 @@ class XinchaoEvaluator:
             "previous_darkflow": str(previous_darkflow or "")[:500],
             "timing": timing or {},
             "memory_resonance": (memory_resonance or [])[:4],
-            "unresolved_tasks": (unresolved_tasks or [])[:4],
         }
         response = await self.client.chat.completions.create(
             model=self.model,
@@ -627,20 +641,20 @@ class XinchaoEvaluator:
                         "如果 timing.presence_only=true，表示用户最后一次报到后没有任何新事件写入；"
                         "此时只能依据已经过去的时间、all_pipes 和 previous_darkflow 写内在变化，"
                         "不得补造聊天、地点、人物、动作或现实事件，也不要把‘没有新事件’写成报告。"
-                        "all_pipes 是完整状态，不得只盯最高三项；它们是压力和倾向，不是固定台词。"
+                        "all_pipes 包含全部48项当前值，必须整体读取，不得只盯最高三项；"
+                        "它们只决定内在反应的强弱、矛盾和语气，不是事实，也不是固定台词。"
+                        "具体写什么必须来自 latest_mailbox、events_after_mailbox、inner_thoughts 或 memory_resonance；"
+                        "没有真实事件依据就不得补造具体内容。"
                         "inner_thoughts 是同一内心里尚未说出口的闪念与执念；text、reason、tone 和 intensity 都要参考。"
                         "闪念可以很轻，执念应保持连续性；它们只能影响内心走向，不得逐条复述或直接当成推送命令。"
                         "memory_resonance 是通过文本与向量检索找到的旧记忆或历史信箱片段，只能作为联想和情绪来源；"
                         "它不是正在发生的新事实，不得假装旧事此刻又发生，也不得逐字复述。"
-                        "unresolved_tasks 是仍未完成的事情，只能影响内心的惦记、责任或悬而未决感；"
-                        "不要逐条汇报任务，不要替用户宣布完成，也不要把它变成主动推送指令。"
                         "可以出现矛盾、自私、嫉妒、占有欲或其他不体面的真实念头，也可以什么新念头都没有。"
                         "不要从预设清单套想法。念头与行动必须分开，不能把内心波动自动写成控制或伤害行为。"
                         "用第一人称和 proxy_voice 指定的口吻，遵守 darkflow_rules，写得自然、具体、连得上上下文；"
                         "不要写成报告，不列数值，不写‘根据记录’。正文目标 300 到 380 个汉字，最多 400 字。"
-                        "aftereffect 表示这段内在变化对状态造成的小幅余波，只能使用给定状态名，单项 -0.08 到 0.08，"
-                        "全部绝对值之和不超过 0.20；没有可靠变化就返回空对象。"
-                        "只返回 JSON：{\"text\":\"正文\",\"aftereffect\":{\"状态名\":数值}}。"
+                        "暗涌只能读取状态，不能反向修改任何状态值。"
+                        "只返回 JSON：{\"text\":\"正文\"}。"
                     ),
                 },
                 {"role": "user", "content": json.dumps(context, ensure_ascii=False)},
@@ -653,20 +667,7 @@ class XinchaoEvaluator:
         raw = response.choices[0].message.content if response.choices else ""
         result = self._clean_json(str(raw or ""))
         text = str(result.get("text", "")).strip()
-        aftereffect = {}
-        remaining = 0.20
-        for name, raw_value in (result.get("aftereffect") or {}).items():
-            if name not in PIPE_NAMES or remaining <= 0:
-                continue
-            try:
-                value = max(-0.08, min(0.08, float(raw_value)))
-            except (TypeError, ValueError):
-                continue
-            value = max(-remaining, min(remaining, value))
-            if abs(value) >= 0.001:
-                aftereffect[name] = round(value, 4)
-                remaining -= abs(value)
-        return {"text": text, "aftereffect": aftereffect}
+        return {"text": text, "aftereffect": {}}
 
     async def monologue(
         self, pipes: dict, event_summary: str, obsessions: list[dict]
@@ -771,7 +772,9 @@ class XinchaoEvaluator:
                     "role": "system",
                     "content": (
                         "你为同一个 AI 在用户不在时完成一次对外行为，不是另一个人格，也不是系统通知。"
-                        "event_contexts 是本轮真实事件卡。行为必须由事件、all_pipes、darkflow 和已经过去的时间自然引出，"
+                        "event_contexts 是本轮真实事件卡。all_pipes 包含全部48项当前值。"
+                        "行为必须由真实事件、all_pipes、darkflow 和已经过去的时间自然引出，"
+                        "48项状态只决定是否表达、表达强度和语气；具体内容必须来自事件、信箱或被事件唤起的记忆，"
                         "不能随机套问候模板。比如事件明确写了对方出远门，经过合理时间后可以主动问是否到达或到了哪里；"
                         "但事件没有写出的目的地、交通方式和结果绝不能编。"
                         "darkflow 是没有说出口的内心活动，只作为此刻状态的来源；绝不能复述、摘要、改写或汇报 darkflow。"
@@ -812,12 +815,10 @@ class XinchaoEvaluator:
                         "并且当前激素状态足以形成真实的惦记。除非后续事件明确写了对方已经回来、"
                         "到达或事情已经结束，否则不能仅以‘事件自然结束’为理由skip；应选择message，"
                         "时机确实太早时选择wait。hormone_context只决定关心的强弱与语气，不能编造事实。"
-                        "aftereffect 表示把这些话真正说出口后，对自身状态造成的小幅回流。"
-                        "说出想念可能让想靠近加深，也可能释放憋着的表达冲动；必须结合内容判断，"
-                        "禁止一律上涨。单项 -0.05 到 0.05，绝对值总和不超过 0.10；没有可靠变化就返回空对象。"
+                        "推送只能读取状态，不能反向修改任何状态值。"
                         "只返回JSON："
                         '{"action_type":"message|wait|skip","messages":["第一条","可选第二条","可选第三条"],'
-                        '"aftereffect":{"状态名":数值},"wait_minutes":15,"reason":"决定原因"}。'
+                        '"wait_minutes":15,"reason":"决定原因"}。'
                     ),
                 },
                 {"role": "user", "content": json.dumps(context, ensure_ascii=False)},
@@ -840,24 +841,11 @@ class XinchaoEvaluator:
             for value in raw_messages[:3]
             if str(value or "").strip()
         ]
-        aftereffect = {}
-        remaining = 0.10
-        for name, raw_value in (result.get("aftereffect") or {}).items():
-            if name not in PIPE_NAMES or remaining <= 0:
-                continue
-            try:
-                value = max(-0.05, min(0.05, float(raw_value)))
-            except (TypeError, ValueError):
-                continue
-            value = max(-remaining, min(remaining, value))
-            if abs(value) >= 0.001:
-                aftereffect[name] = round(value, 4)
-                remaining -= abs(value)
         return {
             "action_type": action_type,
             "content": messages[0] if messages else "",
             "messages": messages,
-            "aftereffect": aftereffect,
+            "aftereffect": {},
             "wait_minutes": result.get("wait_minutes", 15),
             "reason": str(result.get("reason", "")).strip()[:300],
         }

@@ -957,10 +957,8 @@ async def _xinchao_task_context_provider(
 xinchao_service.set_memory_resonance_provider(
     _xinchao_memory_resonance_provider
 )
-xinchao_service.set_task_context_provider(_xinchao_task_context_provider)
-behavior_service.set_feedback_callback(
-    xinchao_service.apply_behavior_feedback
-)
+# 未竟、时间线和小金库只用于管理与展示，不进入情绪判断。
+# 暗涌与推送只读取当前状态，不再把输出反向写回48项状态。
 behavior_service.set_tendency_provider(
     xinchao_service.behavior_tendency_context
 )
@@ -1014,6 +1012,9 @@ async def _record_xinchao_event(
     correction_key: str = "",
 ) -> dict:
     """Evaluate one successful narrative write without risking the memory write."""
+    if source_tool not in {"mailbox", "hold", "grow", "trace_append"}:
+        logger.info("Skipped non-affective source: %s", source_tool)
+        return {"status": "display_only", "source_tool": source_tool}
     try:
         result = await xinchao_service.record_event(
             content,
@@ -2258,13 +2259,6 @@ async def tasks(
                 title, details, importance if 1 <= importance <= 5 else 3,
                 source="mcp:tasks"
             )
-            hormone_content = f"我新增了一件未完成的事：{item['title']}。"
-            await _record_xinchao_event(
-                hormone_content,
-                "task_content",
-                str(item["task_id"]),
-                correction_key=f"task:{item['task_id']}:content",
-            )
             return _with_response_seal("未竟事项已新增。\n" + render(item))
 
         if normalized in {"update", "complete", "cancel", "reopen"}:
@@ -2287,27 +2281,6 @@ async def tasks(
                     "complete": "completed", "cancel": "cancelled", "reopen": "open"
                 }[normalized]
             item = await task_service.update_manual(task_id, **changes)
-            state_words = {
-                "open": "重新成为待处理事项",
-                "completed": "已经完成",
-                "cancelled": "已经取消",
-            }
-            hormone_content = (
-                f"未竟事项“{item['title']}”{state_words[item['status']]}。"
-            )
-            if normalized == "update" and "status" not in changes:
-                await _record_xinchao_event(
-                    f"我修改了一件未竟事项：{item['title']}。{item.get('details') or ''}",
-                    "task_content",
-                    str(item["task_id"]),
-                    correction_key=f"task:{item['task_id']}:content",
-                )
-            else:
-                await _record_xinchao_event(
-                    hormone_content,
-                    "task_status",
-                    str(item["task_id"]),
-                )
             return _with_response_seal("未竟事项已更新。\n" + render(item))
 
         if normalized == "delete":
@@ -3335,12 +3308,6 @@ async def timeline(
         return _with_response_seal("事实时间线写入失败，原记忆桶未受影响。")
 
     status = "记录没有变化" if saved["status"] == "unchanged" else "已记录"
-    if saved["status"] != "unchanged":
-        await _record_xinchao_event(
-            f"我确认了一条事实变化：{fact_label}，现在是“{fact_value}”。",
-            "timeline",
-            str(saved.get("version_id") or saved.get("fact_key") or fact_label),
-        )
     body = f"{status}：{fact_label}\n{_render_fact_timeline(visible).lstrip()}"
     return _with_response_seal(body)
 
@@ -3958,12 +3925,6 @@ async def treasury(
                 source="mcp:treasury",
             )
             kind = "收入" if normalized_action == "income" else "支出"
-            await _record_xinchao_event(
-                f"我在小金库记下了一笔{kind}：{result['entry'].get('reason') or reason}。",
-                "treasury",
-                str(result["entry"].get("entry_id") or ""),
-                correction_key=f"treasury:{result['entry'].get('entry_id') or ''}",
-            )
             return _with_response_seal(
                 f"{kind}已记入小金库。\n"
                 f"{format_entry(result['entry'])}\n\n"
@@ -4044,12 +4005,6 @@ async def treasury(
             amount=proposed_amount,
             reason=proposed_reason,
             occurred_at=proposed_time,
-        )
-        await _record_xinchao_event(
-            f"我修改了一笔小金库记录：{result['entry'].get('reason') or proposed_reason}。",
-            "treasury",
-            str(entry_id),
-            correction_key=f"treasury:{entry_id}",
         )
         return _with_response_seal(
             f"账目 #{entry_id} 已修改，修改前完整记录已保存。\n"

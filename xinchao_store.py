@@ -1957,6 +1957,10 @@ class XinchaoService:
                        deltas_json, signals_json, composites_json, processed_at
                 FROM xinchao_events
                 WHERE status='applied' AND deltas_json NOT IN ('', '{}')
+                  AND source_tool IN (
+                    'mailbox', 'hold', 'grow', 'trace_append',
+                    'manager_memory', 'manager_append', 'manager_create', 'memory'
+                  )
                 ORDER BY event_id DESC LIMIT ?
                 """,
                 (max(1, min(200, int(limit))),),
@@ -2453,14 +2457,6 @@ class XinchaoService:
                     )
                 except Exception as error:
                     logger.warning("Memory resonance unavailable: %s", error)
-            unresolved_tasks = []
-            if self.task_context_provider is not None:
-                try:
-                    unresolved_tasks = await self.task_context_provider(
-                        preview, contexts
-                    )
-                except Exception as error:
-                    logger.warning("Task context unavailable: %s", error)
             try:
                 private_thoughts = [
                     item
@@ -2484,11 +2480,11 @@ class XinchaoService:
                     previous_darkflow=(existing or {}).get("content", ""),
                     timing=timing,
                     memory_resonance=memory_resonance,
-                    unresolved_tasks=unresolved_tasks,
+                    unresolved_tasks=[],
                 )
                 if isinstance(generated, dict):
                     generated_text = generated.get("text", "")
-                    aftereffect = generated.get("aftereffect", {})
+                    aftereffect = {}
                 else:
                     generated_text = generated
                     aftereffect = {}

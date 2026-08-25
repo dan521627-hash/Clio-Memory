@@ -313,6 +313,24 @@ async def require_manager_login(request: Request, call_next):
         if not _manager_authenticated(request):
             return JSONResponse({"detail": "请先登录管理页。"}, status_code=401)
     response = await call_next(request)
+    if (
+        request.method in {"POST", "PUT", "PATCH", "DELETE"}
+        and path.startswith("/api/")
+        and not path.startswith("/api/auth/")
+        and response.status_code < 400
+    ):
+        try:
+            observed = await xinchao_service.observe_presence(
+                session_id="manager",
+                source=f"manager:{request.method.lower()}:{path}",
+                event_id=request.headers.get("x-request-id", ""),
+                interrupt_silence=True,
+            )
+            await behavior_service.store.cancel_for_activity(
+                int(observed.get("previous_cycle_id", observed.get("cycle_id", 0)) or 0)
+            )
+        except Exception as error:
+            logger.warning("Manager activity interruption failed: %s", error)
     if path in {"/", "/index.html", "/manage", "/manage/", "/manage/index.html"}:
         response.headers["Cache-Control"] = "no-store, max-age=0"
         response.headers["Pragma"] = "no-cache"
@@ -392,6 +410,14 @@ async def _record_xinchao(
     *,
     correction_key: str = "",
 ) -> dict:
+    if source_tool not in {
+        "mailbox",
+        "manager_memory",
+        "manager_append",
+        "manager_create",
+    }:
+        logger.info("Skipped non-affective manager source: %s", source_tool)
+        return {"status": "display_only", "source_tool": source_tool}
     try:
         result = await xinchao_service.record_event(
             content,
@@ -455,11 +481,6 @@ async def _record_sidecars(
         )
     except Exception as error:
         logger.warning("Manager fact hook failed after successful write: %s", error)
-
-
-async def _record_task_hormone(content: str, task_id: int) -> None:
-    """Route a manual unfinished-item change through the shared event loop."""
-    await _record_xinchao(content, "manager_task", str(task_id))
 
 
 async def _xinchao_memory_resonance_provider(
@@ -558,8 +579,8 @@ async def _xinchao_task_context_provider(
 
 
 xinchao_service.set_memory_resonance_provider(_xinchao_memory_resonance_provider)
-xinchao_service.set_task_context_provider(_xinchao_task_context_provider)
-behavior_service.set_feedback_callback(xinchao_service.apply_behavior_feedback)
+# 未竟、时间线和小金库只用于管理与展示，不进入情绪判断。
+# 暗涌与推送只读取当前状态，不再把输出反向写回48项状态。
 behavior_service.set_tendency_provider(xinchao_service.behavior_tendency_context)
 
 
@@ -1561,13 +1582,6 @@ async def create_fact_timeline(payload: FactTimelineCreate) -> dict:
             source_ref=source_id or "manager",
             source_excerpt=payload.source_excerpt,
         )
-        if item.get("status") != "unchanged":
-            await _record_xinchao(
-                f"我确认了一条事实变化：{payload.fact}，现在是“{payload.value}”。",
-                "manager_timeline",
-                str(item.get("version_id") or item.get("fact_key") or payload.fact),
-                correction_key=f"timeline:{item.get('fact_key') or payload.fact}",
-            )
         return {"item": item, "status": item["status"]}
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
@@ -1577,14 +1591,6 @@ async def create_fact_timeline(payload: FactTimelineCreate) -> dict:
 async def confirm_fact_candidate(candidate_id: int) -> dict:
     try:
         result = await fact_timeline_service.confirm_candidate(candidate_id)
-        item = result.get("item") if isinstance(result, dict) else None
-        if isinstance(item, dict):
-            await _record_xinchao(
-                f"我确认了一条事实变化：{item.get('fact_label') or item.get('fact') or ''}，现在是“{item.get('value') or ''}”。",
-                "fact_candidate",
-                str(candidate_id),
-                correction_key=f"timeline:{item.get('fact_key') or item.get('fact_label') or item.get('fact') or candidate_id}",
-            )
         return result
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
@@ -1638,12 +1644,6 @@ async def create_task(payload: TaskCreate) -> dict:
         item = await task_service.create_manual(
             payload.title, payload.details, payload.importance, source="manager"
         )
-        await _record_xinchao(
-            f"我记下了一件还要做的事：{item['title']}。",
-            "manager_task_content",
-            str(item["task_id"]),
-            correction_key=f"task:{item['task_id']}:content",
-        )
         return {
             "ok": True,
             "item": _public_task_item(await task_service.store.get(item["task_id"])),
@@ -1659,20 +1659,6 @@ async def update_task(task_id: int, payload: TaskUpdate) -> dict:
         raise HTTPException(status_code=400, detail="没有提供需要修改的内容。")
     try:
         item = await task_service.update_manual(task_id, **changes)
-        state_words = {"open": "重新开始处理", "completed": "已经完成", "cancelled": "已经取消"}
-        if "status" in changes:
-            await _record_xinchao(
-                f"未竟事项“{item['title']}”{state_words[item['status']]}。",
-                "manager_task_status",
-                str(task_id),
-            )
-        else:
-            await _record_xinchao(
-                f"我修改了一件未竟事项：{item['title']}。{item.get('details') or ''}",
-                "manager_task_content",
-                str(task_id),
-                correction_key=f"task:{task_id}:content",
-            )
         return {
             "ok": True,
             "item": _public_task_item(await task_service.store.get(task_id)),
@@ -2288,14 +2274,6 @@ async def create_treasury_entry(payload: TreasuryCreate) -> dict:
         )
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
-    entry = result.get("entry") or {}
-    kind = "收入" if entry.get("entry_type") == "income" else "支出"
-    await _record_xinchao(
-        f"我在小金库记下了一笔{kind}：{entry.get('reason') or payload.reason}。",
-        "manager_treasury",
-        str(entry.get("entry_id") or ""),
-        correction_key=f"treasury:{entry.get('entry_id') or ''}",
-    )
     return {"ok": True, **result}
 
 
@@ -2313,13 +2291,6 @@ async def update_treasury_entry(
         )
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
-    entry = result.get("entry") or {}
-    await _record_xinchao(
-        f"我修改了一笔小金库记录：{entry.get('reason') or payload.reason or ''}。",
-        "manager_treasury",
-        str(entry_id),
-        correction_key=f"treasury:{entry_id}",
-    )
     return {"ok": True, **result}
 
 

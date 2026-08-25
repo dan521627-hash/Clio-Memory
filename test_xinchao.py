@@ -175,6 +175,28 @@ class XinchaoEngineTests(unittest.TestCase):
         fenced = '说明如下：\n```json\n{"event":"测试","pipes":{}}\n```'
         self.assertEqual(XinchaoEvaluator._clean_json(fenced)["event"], "测试")
 
+    def test_trace_prompt_formats_and_signal_json_is_recovered(self):
+        from xinchao_engine import PIPE_NAMES
+        from xinchao_evaluator import TRACE_EFFECT_PROMPT, XinchaoEvaluator
+
+        rendered = TRACE_EFFECT_PROMPT.format(pipes="、".join(PIPE_NAMES))
+        self.assertIn('"signals"', rendered)
+        parsed = XinchaoEvaluator._clean_json(
+            '前缀 {"signals":[{"state":"想靠近","delta":0.1}]}'
+        )
+        self.assertIn("signals", parsed)
+
+    def test_evaluator_uses_safe_token_budget_for_full_evidence_schema(self):
+        from xinchao_evaluator import XinchaoEvaluator
+
+        evaluator = XinchaoEvaluator(
+            {
+                "xinchao": {"enabled": True},
+                "dehydration": {"api_key": "", "max_tokens": 1024},
+            }
+        )
+        self.assertEqual(evaluator.max_tokens, 2048)
+
     def test_private_judge_config_is_filtered_and_changes_prompt_hash(self):
         from xinchao_evaluator import XinchaoEvaluator
 
@@ -753,7 +775,7 @@ class XinchaoServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(boot.get("darkflow_item"))
         self.assertEqual(boot.get("darkflow"), "")
 
-    async def test_darkflow_aftereffect_is_bounded_and_applied_once(self):
+    async def test_darkflow_reads_pipes_without_writing_aftereffect_back(self):
         with tempfile.TemporaryDirectory() as root:
             service = XinchaoService(
                 config(root, monologue_enabled=True, darkflow_stage_hours=[0])
@@ -773,7 +795,9 @@ class XinchaoServiceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(first["status"], "updated")
         self.assertEqual(second["status"], "waiting")
-        self.assertLessEqual(after_first["pipes"]["想靠近"] - before["pipes"]["想靠近"], 0.0801)
+        self.assertAlmostEqual(
+            after_first["pipes"]["想靠近"], before["pipes"]["想靠近"], places=4
+        )
         self.assertAlmostEqual(
             after_first["pipes"]["想靠近"],
             after_second["pipes"]["想靠近"],
@@ -783,8 +807,8 @@ class XinchaoServiceTests(unittest.IsolatedAsyncioTestCase):
             after_first["pipes"]["醋"], after_second["pipes"]["醋"], places=4
         )
         saved = json.loads(row[0])
-        self.assertEqual(saved, {"想靠近": 0.08, "醋": 0.08})
-        self.assertIsNotNone(row[1])
+        self.assertEqual(saved, {})
+        self.assertIsNone(row[1])
 
     async def test_memory_resonance_reaches_darkflow_without_changing_buckets(self):
         with tempfile.TemporaryDirectory() as root:
