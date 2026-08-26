@@ -740,6 +740,7 @@ class XinchaoEvaluator:
         memory_resonance: list[dict] | None = None,
         recent_expression_intents: list[str] | None = None,
         tendency_context: dict | None = None,
+        emotion_drivers: list[dict] | None = None,
         retry_instruction: str = "",
     ) -> dict:
         """Choose one safe outward behavior shaped by the current inner state."""
@@ -761,6 +762,7 @@ class XinchaoEvaluator:
             "memory_resonance": (memory_resonance or [])[:4],
             "recent_expression_intents": (recent_expression_intents or [])[:8],
             "tendency_context": tendency_context or {},
+            "emotion_drivers": (emotion_drivers or [])[:8],
             "retry_instruction": str(retry_instruction or "")[:300],
             "voice": private_config.get("proxy_voice", ""),
             "generation_rules": private_config.get("darkflow_rules", ""),
@@ -791,6 +793,8 @@ class XinchaoEvaluator:
                         "但不得汇报检索过程、来源类型、桶名、编号或整段复述原文。"
                         "recent_expression_intents 表示近48小时用过的表达角度，尽量换落点，避免总说同一种话。"
                         "tendency_context 是长期性格轨迹，不是固定人格改写，也不是命令。"
+                        "emotion_drivers 是本轮最明显的状态变化及其来源摘要，用来帮助你判断语气与时机；"
+                        "它不能替代真实事件，也不能据此编造用户没有写过的事实。"
                         "只有当前事件与其中的情境相似时，才可以轻微影响语气、等待时机或表达角度；"
                         "不能凭空制造事件，不能因为倾向就强行发送，也不能覆盖当前事件、固定人格边界和安全规则。"
                         "retry_instruction 非空时说明上一版过于重复，必须真正换句式、角度和具体细节，"

@@ -2109,14 +2109,85 @@ async def behavior_actions(
         "held": "暂存", "rehearsal": "生成中",
     }
     for item in items:
+        context = item.get("context") or {}
         item["status_label"] = status_labels.get(str(item.get("status") or ""), "推送记录")
         item["display_content"] = str(item.get("content") or "").strip()
-        item["display_reason"] = str(item.get("error") or "").strip()
+        item["display_reason"] = str(
+            context.get("reason") or item.get("error") or ""
+        ).strip()
+        item["trigger_summary"] = str(context.get("trigger_summary") or "").strip()
+        item["emotion_drivers"] = list(context.get("emotion_drivers") or [])
         item["record_kind"] = "delivery"
     for item in candidates:
+        context = item.get("decision_context") or {}
         item["status_label"] = status_labels.get(str(item.get("status") or ""), "推送判断")
         item["display_reason"] = str(item.get("decision_note") or "").strip()
+        item["trigger_summary"] = str(context.get("trigger_summary") or "").strip()
+        item["emotion_drivers"] = list(context.get("emotion_drivers") or [])
+        item["next_review_at"] = item.get("due_at") if item.get("status") == "waiting" else None
         item["record_kind"] = "decision"
+    state = await xinchao_service.status()
+    latest_candidate = candidates[0] if candidates else {}
+    latest_context = latest_candidate.get("decision_context") or {}
+    latest_action = next(
+        (
+            item for item in items
+            if int(item.get("cycle_id") or -1) == int(state.get("cycle_id") or -2)
+        ),
+        {},
+    )
+    event_contexts = list(state.get("event_contexts") or [])
+    trigger_summary = str(
+        latest_context.get("trigger_summary")
+        or ((event_contexts[-1] if event_contexts else {}).get("context_card"))
+        or state.get("event_summary")
+        or "本轮没有单独的文字写入"
+    ).strip()
+    drivers = list(latest_context.get("emotion_drivers") or [])
+    if not drivers:
+        ranked = []
+        for name, raw_value in (state.get("pipes") or {}).items():
+            try:
+                ranked.append({"name": str(name), "value": round(float(raw_value), 4)})
+            except (TypeError, ValueError):
+                continue
+        drivers = sorted(ranked, key=lambda row: -row["value"])[:6]
+    phase = str(state.get("interaction_phase") or "closed")
+    if phase == "active":
+        phase_label = "30分钟候静默计时中"
+        phase_detail = "有任何新操作都会从头计时；这段时间不会生成暗涌，也不会判断推送。"
+    elif latest_candidate.get("status") == "waiting":
+        phase_label = "DeepSeek决定再等等"
+        phase_detail = str(latest_candidate.get("decision_note") or "稍后重新判断是否适合推送")
+    elif latest_action:
+        phase_label = str(latest_action.get("status_label") or "本轮判断完成")
+        phase_detail = str(
+            latest_action.get("display_reason")
+            or latest_action.get("display_content")
+            or "本轮判断已经完成"
+        )
+    elif latest_candidate:
+        phase_label = str(latest_candidate.get("status_label") or "正在判断")
+        phase_detail = str(latest_candidate.get("decision_note") or "正在判断是否需要推送")
+    elif phase == "absence":
+        phase_label = "已进入静默，等待判断"
+        phase_detail = "候静默已经完整结束，正在结合本轮写入和48项情绪进行判断。"
+    else:
+        phase_label = "当前没有进行中的推送判断"
+        phase_detail = "下一次真实写入或操作后会开始新的30分钟候静默。"
+    trajectory = {
+        "cycle_id": state.get("cycle_id"),
+        "phase": phase,
+        "phase_label": phase_label,
+        "phase_detail": phase_detail,
+        "last_activity_at": state.get("last_presence_at") or state.get("last_event_at"),
+        "silence_due_at": (state.get("timing") or {}).get("absence_due_at"),
+        "silence_started_at": state.get("absence_started_at"),
+        "next_review_at": latest_candidate.get("next_review_at"),
+        "trigger_summary": trigger_summary,
+        "emotion_drivers": drivers,
+        "pipe_count": len(state.get("pipes") or {}),
+    }
     pending = await behavior_service.store.pending_handoff_summary()
     return {
         "items": items,
@@ -2128,6 +2199,7 @@ async def behavior_actions(
         "configured": behavior_service.configured,
         "push_title": await behavior_service.push_title(),
         "pending": pending,
+        "trajectory": trajectory,
     }
 
 

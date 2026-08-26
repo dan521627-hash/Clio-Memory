@@ -1053,10 +1053,9 @@ async def _record_xinchao_event(
                     await behavior_service.store.cancel_source_event(
                         int(correction["supersedes_event_id"])
                     )
-                await behavior_service.schedule_event(result, state)
             except Exception as behavior_error:
                 logger.warning(
-                    "Behavior candidate scheduling failed after %s write: %s",
+                    "Behavior silence reset failed after %s write: %s",
                     source_tool,
                     behavior_error,
                 )
@@ -4034,9 +4033,12 @@ async def _xinchao_settlement_loop() -> None:
             state = await xinchao_service.status()
             if state.get("interaction_phase") != "absence":
                 darkflow = None
-            due_results = await behavior_service.process_due(
-                state, mailbox_context, darkflow
-            )
+                due_results = []
+            else:
+                await behavior_service.process_silence_nudge(state)
+                due_results = await behavior_service.process_due(
+                    state, mailbox_context, darkflow
+                )
             already_sent = any(
                 item.get("status") in {"sent", "rehearsal"}
                 for item in due_results

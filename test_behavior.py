@@ -102,6 +102,59 @@ def config(root, mode="rehearsal"):
 
 
 class BehaviorServiceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_silence_entry_waits_until_absence_and_is_idempotent(self):
+        with tempfile.TemporaryDirectory() as root:
+            service = BehaviorService(config(root), FakeBehaviorEvaluator())
+            active = {
+                "cycle_id": 88,
+                "interaction_phase": "active",
+                "pipes": {f"状态{i}": i / 100 for i in range(48)},
+            }
+            waiting = await service.process_silence_nudge(active)
+            before = await service.store.list_candidates()
+            absence = {
+                **active,
+                "interaction_phase": "absence",
+                "absence_started_at": beijing_now().isoformat(timespec="seconds"),
+                "event_contexts": [{"context_card": "一条新的交接信已经写入。"}],
+            }
+            first = await service.process_silence_nudge(absence)
+            second = await service.process_silence_nudge(absence)
+            after = await service.store.list_candidates()
+
+        self.assertEqual(waiting["status"], "waiting")
+        self.assertEqual(before, [])
+        self.assertEqual(first["status"], "pending")
+        self.assertEqual(second["status"], "duplicate")
+        self.assertEqual(len(after), 1)
+        self.assertEqual(after[0]["decision_context"]["pipe_count"], 48)
+        self.assertEqual(
+            after[0]["decision_context"]["trigger_summary"],
+            "一条新的交接信已经写入。",
+        )
+
+    async def test_silence_entry_decision_receives_all_48_pipes(self):
+        with tempfile.TemporaryDirectory() as root:
+            evaluator = FakeBehaviorEvaluator()
+            service = BehaviorService(config(root), evaluator)
+            pipes = {f"状态{i}": round((i + 1) / 50, 2) for i in range(48)}
+            state = {
+                "cycle_id": 89,
+                "interaction_phase": "absence",
+                "absence_started_at": beijing_now().isoformat(timespec="seconds"),
+                "elapsed_seconds": 0,
+                "sleep_stage": "awake_waiting",
+                "pipes": pipes,
+                "event_contexts": [{"context_card": "一条真实写入触发了新的状态。"}],
+            }
+            await service.process_silence_nudge(state)
+            result = await service.process_due(state, None, None)
+
+        self.assertEqual(result[0]["status"], "rehearsal")
+        self.assertEqual(evaluator.calls[0]["pipes"], pipes)
+        self.assertEqual(len(evaluator.calls[0]["pipes"]), 48)
+        self.assertEqual(evaluator.calls[0]["timing"]["decision_phase"], "silence_entry")
+
     async def test_behavior_decision_receives_separate_soft_tendency_context(self):
         with tempfile.TemporaryDirectory() as root:
             evaluator = LongingBehaviorEvaluator()

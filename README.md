@@ -46,6 +46,7 @@ AI 写下一件事或一封信
 
 - [公开版更新记录](CHANGELOG.md)
 - [v1.4 更新说明与工作原理](RELEASE-NOTES-v1.4.md)
+- [v1.4.1 真静默、暗涌与推送说明](RELEASE-NOTES-v1.4.1.md)
 - [完整功能与联动说明](docs/FEATURES-ZH.md)
 - [小白安装教程](docs/INSTALL-ZH.md)
 - [使用方式与常见问题](docs/FAQ-ZH.md)

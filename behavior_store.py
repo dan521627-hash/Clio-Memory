@@ -108,6 +108,7 @@ class BehaviorStore:
                 "follow_up_required": "INTEGER NOT NULL DEFAULT 0",
                 "hormone_name": "TEXT NOT NULL DEFAULT ''",
                 "hormone_drive": "REAL NOT NULL DEFAULT 0",
+                "decision_context_json": "TEXT NOT NULL DEFAULT '{}'",
             }
             for column, declaration in candidate_migrations.items():
                 if column not in candidate_columns:
@@ -634,7 +635,27 @@ class BehaviorStore:
             )
         except (TypeError, ValueError):
             item["event_contexts"] = []
+        try:
+            item["decision_context"] = json.loads(
+                item.pop("decision_context_json", "{}")
+            )
+        except (TypeError, ValueError):
+            item["decision_context"] = {}
         return item
+
+    def _candidate_for_cycle_sync(self, cycle_id: int) -> dict | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM behavior_candidates "
+                "WHERE cycle_id=? AND source_event_id=? "
+                "ORDER BY candidate_id DESC LIMIT 1",
+                (int(cycle_id), -abs(int(cycle_id))),
+            ).fetchone()
+        return self._decode_candidate(row)
+
+    async def candidate_for_cycle(self, cycle_id: int) -> dict | None:
+        """Return the one silence-entry decision belonging to this cycle."""
+        return await asyncio.to_thread(self._candidate_for_cycle_sync, cycle_id)
 
     def _upsert_candidate_sync(self, payload: dict) -> dict:
         stamp = now_iso()
@@ -645,8 +666,9 @@ class BehaviorStore:
                 INSERT INTO behavior_candidates (
                     cycle_id, source_event_id, created_at, due_at, expires_at,
                     status, attempts, event_context_json, decision_note,
-                    follow_up_required, hormone_name, hormone_drive, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?)
+                    follow_up_required, hormone_name, hormone_drive,
+                    decision_context_json, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(source_event_id) DO UPDATE SET
                     due_at=excluded.due_at,
                     expires_at=excluded.expires_at,
@@ -656,6 +678,7 @@ class BehaviorStore:
                     follow_up_required=excluded.follow_up_required,
                     hormone_name=excluded.hormone_name,
                     hormone_drive=excluded.hormone_drive,
+                    decision_context_json=excluded.decision_context_json,
                     updated_at=excluded.updated_at
                 """,
                 (
@@ -670,6 +693,7 @@ class BehaviorStore:
                     1 if payload.get("follow_up_required") else 0,
                     str(payload.get("hormone_name", ""))[:80],
                     max(0.0, min(1.0, float(payload.get("hormone_drive", 0.0)))),
+                    json.dumps(payload.get("decision_context", {}), ensure_ascii=False),
                     stamp,
                 ),
             )

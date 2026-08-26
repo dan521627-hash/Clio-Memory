@@ -204,6 +204,19 @@ class BehaviorService:
         return max(values.items(), key=lambda item: item[1])
 
     @staticmethod
+    def _top_pipe_drivers(pipes: dict | None, limit: int = 6) -> list[dict]:
+        """Keep a human-readable snapshot while DeepSeek still receives every pipe."""
+        ranked = []
+        for name, raw_value in (pipes or {}).items():
+            try:
+                value = max(0.0, min(1.0, float(raw_value)))
+            except (TypeError, ValueError):
+                continue
+            ranked.append({"name": str(name), "value": round(value, 4)})
+        ranked.sort(key=lambda item: (-item["value"], item["name"]))
+        return ranked[: max(1, min(12, int(limit)))]
+
+    @staticmethod
     def _expression_intent(
         state: dict,
         memory_resonance: list[dict] | None,
@@ -469,6 +482,11 @@ class BehaviorService:
                 "decision_note": reason or (
                     "等待到点复核" if follow_up else "事件不需要后续主动联系"
                 ),
+                "decision_context": {
+                    "phase": "legacy_event_schedule",
+                    "emotion_drivers": self._top_pipe_drivers(state.get("pipes", {})),
+                    "pipe_count": len(state.get("pipes", {}) or {}),
+                },
             }
         )
         return {"status": candidate["status"], "item": candidate}
@@ -491,6 +509,7 @@ class BehaviorService:
         results = []
         for candidate in candidates:
             candidate_id = int(candidate["candidate_id"])
+            decision_context = dict(candidate.get("decision_context") or {})
             if self._in_quiet_hours(moment):
                 due_at = self._quiet_release_at(moment, candidate_id)
                 await self.store.update_candidate(
@@ -513,7 +532,11 @@ class BehaviorService:
                 )
                 results.append({"status": "cancelled", "candidate_id": candidate_id})
                 continue
-            if int(state.get("elapsed_seconds", 0)) < self.minimum_delay_minutes * 60:
+            if (
+                decision_context.get("phase") != "silence_entry"
+                and int(state.get("elapsed_seconds", 0))
+                < self.minimum_delay_minutes * 60
+            ):
                 due_at = moment + timedelta(minutes=self.presence_retry_minutes)
                 await self.store.update_candidate(
                     candidate_id,
@@ -548,6 +571,10 @@ class BehaviorService:
                         "schedule_recheck": str(
                             candidate.get("decision_note", "")
                         ).startswith("情绪驱动较高，保留一次到点复核"),
+                        "decision_phase": decision_context.get("phase", ""),
+                        "silence_started_at": decision_context.get(
+                            "silence_started_at", ""
+                        ),
                     },
                     "required_follow_up": bool(candidate.get("follow_up_required")),
                     "hormone_context": {
@@ -557,6 +584,7 @@ class BehaviorService:
                         "current_drive": current_hormone_drive,
                     },
                     "memory_resonance": list((darkflow or {}).get("memory_resonance") or []),
+                    "emotion_drivers": decision_context.get("emotion_drivers", []),
                 }, state)
             except Exception as error:
                 logger.warning("Due behavior decision failed: %s", error)
@@ -644,6 +672,13 @@ class BehaviorService:
                         "dominant_value": state.get("dominant_value", 0),
                         "event_count": len(event_contexts),
                         "message_count": len(messages),
+                        "reason": reason,
+                        "trigger_summary": decision_context.get("trigger_summary", ""),
+                        "emotion_drivers": decision_context.get("emotion_drivers", []),
+                        "pipe_count": decision_context.get(
+                            "pipe_count", len(state.get("pipes", {}) or {})
+                        ),
+                        "phase": decision_context.get("phase", "absence"),
                     },
                 }
             )
@@ -718,9 +753,18 @@ class BehaviorService:
                             "dominant": state.get("dominant", ""),
                             "dominant_value": state.get("dominant_value", 0),
                             "sleep_stage": darkflow.get("sleep_stage", ""),
-                            "event_count": len(darkflow.get("contexts", [])),
-                            "reason": str(decision.get("reason", ""))[:300],
-                        },
+                        "event_count": len(darkflow.get("contexts", [])),
+                        "reason": str(decision.get("reason", ""))[:300],
+                        "trigger_summary": str(
+                            ((darkflow.get("contexts") or [{}])[-1]).get(
+                                "context_card", ""
+                            )
+                        )[:300],
+                        "emotion_drivers": self._top_pipe_drivers(
+                            state.get("pipes", {})
+                        ),
+                        "pipe_count": len(state.get("pipes", {}) or {}),
+                    },
                     }
                 )
                 return {"status": "skipped", "item": item}
@@ -758,6 +802,16 @@ class BehaviorService:
                         "sleep_stage": darkflow.get("sleep_stage", ""),
                         "event_count": len(darkflow.get("contexts", [])),
                         "message_count": len(messages),
+                        "reason": str(decision.get("reason", ""))[:300],
+                        "trigger_summary": str(
+                            ((darkflow.get("contexts") or [{}])[-1]).get(
+                                "context_card", ""
+                            )
+                        )[:300],
+                        "emotion_drivers": self._top_pipe_drivers(
+                            state.get("pipes", {})
+                        ),
+                        "pipe_count": len(state.get("pipes", {}) or {}),
                     },
                 }
             )
@@ -772,5 +826,65 @@ class BehaviorService:
             return {"status": "failed", "error": str(error)}
 
     async def process_silence_nudge(self, state: dict) -> dict:
-        """Compatibility stub: open-window silence nudges are intentionally disabled."""
-        return {"status": "disabled", "reason": "silence nudges removed"}
+        """Create one idempotent push decision exactly when true silence begins."""
+        if not self.enabled:
+            return {"status": "disabled"}
+        if state.get("interaction_phase") != "absence":
+            return {"status": "waiting", "phase": "active"}
+        cycle_id = int(state.get("cycle_id") or 0)
+        if cycle_id <= 0:
+            return {"status": "idle"}
+        existing = await self.store.candidate_for_cycle(cycle_id)
+        if existing:
+            return {"status": "duplicate", "item": existing}
+
+        # Clear any legacy candidate that may have been scheduled immediately
+        # after a write.  The silence-entry decision below is the only push
+        # decision allowed for this interaction cycle.
+        await self.store.cancel_cycle(cycle_id)
+
+        moment = beijing_now()
+        contexts = list(state.get("event_contexts") or [])
+        trigger_summary = ""
+        if contexts:
+            latest = contexts[-1]
+            trigger_summary = str(
+                latest.get("context_card")
+                or latest.get("event_summary")
+                or latest.get("event_tag")
+                or ""
+            ).strip()
+        hormone_name, hormone_drive = self._hormone_drive(state.get("pipes", {}))
+        candidate = await self.store.upsert_candidate(
+            {
+                "cycle_id": cycle_id,
+                "source_event_id": -abs(cycle_id),
+                "created_at": state.get("absence_started_at")
+                or moment.isoformat(timespec="seconds"),
+                "due_at": moment.isoformat(timespec="seconds"),
+                "expires_at": (moment + timedelta(hours=8)).isoformat(
+                    timespec="seconds"
+                ),
+                "status": "pending",
+                "event_contexts": contexts,
+                "follow_up_required": self._has_unresolved_follow_up(contexts),
+                "hormone_name": hormone_name,
+                "hormone_drive": hormone_drive,
+                "decision_note": (
+                    "已连续30分钟没有新操作，进入静默；"
+                    "正在结合本轮写入与48项情绪判断是否推送"
+                ),
+                "decision_context": {
+                    "phase": "silence_entry",
+                    "silence_started_at": state.get("absence_started_at"),
+                    "last_activity_at": state.get("last_presence_at")
+                    or state.get("last_event_at"),
+                    "trigger_summary": trigger_summary,
+                    "emotion_drivers": self._top_pipe_drivers(
+                        state.get("pipes", {})
+                    ),
+                    "pipe_count": len(state.get("pipes", {}) or {}),
+                },
+            }
+        )
+        return {"status": "pending", "item": candidate}
