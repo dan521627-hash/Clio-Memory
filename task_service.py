@@ -25,7 +25,10 @@ class TaskService:
     def __init__(self, config: dict, evaluator, embedding_index):
         settings = config.get("tasks", {})
         self.enabled = bool(settings.get("enabled", True))
-        self.auto_extract = bool(settings.get("auto_extract", True))
+        # Unfinished matters are deliberate commitments, not machine guesses.
+        # DeepSeek may help only when the current AI explicitly asks it to;
+        # ordinary mailbox/memory writes never create or close tasks.
+        self.auto_extract = False
         self.max_candidates = max(3, min(20, int(settings.get("max_candidates", 8))))
         self.semantic_threshold = max(
             0.5, min(0.98, float(settings.get("semantic_threshold", 0.78)))
@@ -81,7 +84,10 @@ class TaskService:
     ) -> list[dict]:
         items = await self.store.list(status=status, limit=500)
         if not include_closed and not status:
-            items = [item for item in items if item["status"] == "open"]
+            items = [
+                item for item in items
+                if item["status"] in self.store.ACTIVE_WORKFLOW_STATES
+            ]
         if not str(query or "").strip():
             return items[: max(1, min(100, int(limit)))]
         semantic_scores = {}
@@ -336,6 +342,17 @@ class TaskService:
         source_ref: str = "",
         external_event_id: str = "",
     ) -> dict:
+        # Kept as a no-op compatibility hook because older write paths still
+        # call it.  This guarantees that DeepSeek cannot silently maintain the
+        # task ledger from narrative writes.
+        return {
+            "status": "disabled",
+            "reason": "current_ai_or_user_only",
+            "changes": [],
+        }
+
+        # Historical automatic extraction implementation is intentionally kept
+        # below for rollback/reference, but is unreachable by design.
         if not self.enabled or not self.auto_extract or not str(content or "").strip():
             return {"status": "disabled", "changes": []}
         normalized = " ".join(str(content).strip().split())
@@ -389,8 +406,9 @@ class TaskService:
     async def create_manual(
         self, title: str, details: str = "", importance: int = 3, source: str = "manager"
     ) -> dict:
+        created_by = "ai" if str(source).startswith("mcp:") else "user"
         item = await self.store.create(
-            title=title, details=details, importance=importance, created_by="manual",
+            title=title, details=details, importance=importance, created_by=created_by,
             source_type=source, source_ref="", source_event_id="", excerpt=details,
         )
         await self._embed_item(item)

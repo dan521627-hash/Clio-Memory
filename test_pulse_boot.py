@@ -223,8 +223,8 @@ class PulseBootTests(unittest.IsolatedAsyncioTestCase):
             first = await server.pulse_boot()
             second = await server.pulse_boot()
 
-        self.assertIn("=== Clio 开机记忆 ===", first)
-        self.assertIn("=== Clio 开机记忆 ===", second)
+        self.assertIn("=== 醒来交付 ===", first)
+        self.assertIn("=== 醒来交付 ===", second)
         self.assertNotIn("本窗口已经领取过开机资料", second)
         boot_delivery.assert_not_awaited()
         self.assertEqual(record_boot_delivery.await_count, 2)
@@ -271,9 +271,8 @@ class PulseBootTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertNotIn("【新写入的记忆】", without_new_write)
         self.assertNotIn("旧内容不应再次出现", without_new_write)
-        self.assertIn("【新写入的记忆】", with_new_write)
-        self.assertIn("今天的新记忆", with_new_write)
-        self.assertIn("刚写进去的新内容", with_new_write)
+        self.assertNotIn("【新写入的记忆】", with_new_write)
+        self.assertNotIn("刚写进去的新内容", with_new_write)
 
     async def test_repeated_boot_keeps_context_but_does_not_repeat_darkflow(self):
         manager = FakeManager([])
@@ -309,11 +308,11 @@ class PulseBootTests(unittest.IsolatedAsyncioTestCase):
             first = await server.pulse_boot()
             second = await server.pulse_boot()
 
-        self.assertIn("【暗涌】", first)
+        self.assertIn("【暗涌｜静默期机器生成】", first)
         self.assertIn("只应交付一次的暗涌", first)
-        self.assertNotIn("【暗涌】", second)
-        self.assertIn("=== Clio 开机记忆 ===", second)
-        self.assertIn("【工具】", second)
+        self.assertNotIn("【暗涌｜静默期机器生成】", second)
+        self.assertIn("=== 醒来交付 ===", second)
+        self.assertNotIn("【可用工具】", second)
         mark.assert_awaited_once_with(88)
         self.assertEqual(manager.list_all.await_count, 2)
 
@@ -369,11 +368,10 @@ class PulseBootTests(unittest.IsolatedAsyncioTestCase):
             result = await server.pulse_boot()
 
         self.assertNotIn("【窗口接力·主体】", result)
-        self.assertIn("【暗涌】", result)
+        self.assertIn("【暗涌｜静默期机器生成】", result)
         self.assertIn("信写完以后，我又有了新的变化。", result)
-        self.assertNotIn("【信箱最新留言】", result)
-        self.assertIn("信箱另有最新留言", result)
-        self.assertNotIn("上一窗口亲自留下的信", result)
+        self.assertIn("【上一窗口信箱｜原文】", result)
+        self.assertIn("上一窗口亲自留下的信", result)
         self.assertNotIn("【全库主题导航】", result)
         mark.assert_awaited_once_with(4)
 
@@ -492,7 +490,7 @@ class PulseBootTests(unittest.IsolatedAsyncioTestCase):
 
         behavior_list.assert_awaited_once_with(limit=30)
         behavior_purge.assert_awaited_once_with([91])
-        self.assertIn("【静默期间已发送】", result)
+        self.assertIn("【曾主动找过你｜仅本轮未交付记录】", result)
         self.assertIn("已发送：你什么时候回来？", result)
 
     async def test_mailbox_is_shown_when_no_darkflow_exists(self):
@@ -528,11 +526,42 @@ class PulseBootTests(unittest.IsolatedAsyncioTestCase):
         ):
             result = await server.pulse_boot()
 
-        self.assertIn("【信箱最新留言】", result)
+        self.assertIn("【上一窗口信箱｜原文】", result)
         self.assertIn("上一窗口亲自留下的信", result)
         self.assertNotIn("当前没有待交付暗涌", result)
         self.assertNotIn("【窗口接力·主体】", result)
         self.assertNotIn("【沉默后的变化·暗涌，仅展示一次】", result)
+
+    async def test_boot_current_snapshot_includes_relationship_without_full_pipe_dump(self):
+        manager = FakeManager([])
+        state = {
+            "available": True,
+            "dominant": "责任",
+            "dominant_value": 0.42,
+            "expression_state": {"name": "温和但有些紧绷", "score": 0.67},
+            "relationship": {
+                "label": "有些紧绷",
+                "value": 78.0,
+                "manual_override": True,
+            },
+            "pipes": {"责任": 0.42, "开心": 0.12, "委屈": 0.31},
+        }
+        with (
+            patch.object(server, "bucket_mgr", manager),
+            patch.object(
+                server.xinchao_service,
+                "consume_boot",
+                new=AsyncMock(return_value=state),
+            ),
+            patch.dict(os.environ, {server.RESPONSE_SEAL_ENV: "test-seal"}),
+        ):
+            result = await server.pulse_boot()
+
+        self.assertIn("【此刻｜系统状态快照】", result)
+        self.assertIn("关系：有些紧绷 78.0/200｜手动校准（只代表此刻）", result)
+        self.assertIn("此刻：温和但有些紧绷 0.67", result)
+        self.assertNotIn("开心 0.12", result)
+        self.assertNotIn("委屈 0.31", result)
 
     async def test_private_thoughts_appear_only_when_present(self):
         manager = FakeManager([])
@@ -561,8 +590,7 @@ class PulseBootTests(unittest.IsolatedAsyncioTestCase):
         ):
             result = await server.pulse_boot()
 
-        self.assertIn("【心念】", result)
-        self.assertIn("有 2 条心念（闪念 1，执念 1）", result)
+        self.assertNotIn("【心念】", result)
         self.assertNotIn("我忽然很想知道她现在在做什么", result)
         self.assertNotIn("当前没有心念", result)
 
@@ -617,6 +645,80 @@ class PulseBootTests(unittest.IsolatedAsyncioTestCase):
         finally:
             self.mailbox_context_patch.start()
         self.assertEqual(item["message_id"], 19)
+
+    async def test_background_settlement_reads_latest_mailbox_without_semantic_search(self):
+        fake_store = type(
+            "Mailbox",
+            (),
+            {
+                "list": AsyncMock(
+                    return_value=[
+                        {
+                            "message_id": 31,
+                            "message": "最新真实交接",
+                            "source_tool": "mailbox",
+                        },
+                        {
+                            "message_id": 30,
+                            "message": "后台沉淀",
+                            "source_tool": "xinchao_settlement",
+                        },
+                    ]
+                )
+            },
+        )()
+        with (
+            patch.object(server, "mailbox_store", fake_store),
+            patch.object(server, "search_mailbox", new=AsyncMock()) as search,
+        ):
+            item = await server._settlement_mailbox_context()
+
+        self.assertEqual(item["message_id"], 31)
+        search.assert_not_awaited()
+
+    async def test_background_settlement_tick_reaches_silence_push_path(self):
+        state = {
+            "interaction_phase": "absence",
+            "cycle_id": 44,
+            "pipes": {f"pipe-{index}": 0.1 for index in range(48)},
+        }
+        mailbox = {"message_id": 31, "message": "最新真实交接"}
+        fake_xinchao = type(
+            "Xinchao",
+            (),
+            {
+                "settle_darkflow": AsyncMock(return_value={"status": "waiting"}),
+                "pending_darkflow": AsyncMock(return_value=None),
+                "status": AsyncMock(return_value=state),
+            },
+        )()
+        fake_behavior = type(
+            "Behavior",
+            (),
+            {
+                "process_silence_nudge": AsyncMock(
+                    return_value={"status": "pending"}
+                ),
+                "process_due": AsyncMock(return_value=[{"status": "sent"}]),
+            },
+        )()
+        with (
+            patch.object(
+                server,
+                "_settlement_mailbox_context",
+                new=AsyncMock(return_value=mailbox),
+            ),
+            patch.object(server, "xinchao_service", fake_xinchao),
+            patch.object(server, "behavior_service", fake_behavior),
+        ):
+            result = await server._xinchao_settlement_tick()
+
+        self.assertEqual(result["phase"], "absence")
+        fake_xinchao.settle_darkflow.assert_awaited_once_with(
+            mailbox_context=mailbox
+        )
+        fake_behavior.process_silence_nudge.assert_awaited_once_with(state)
+        fake_behavior.process_due.assert_awaited_once_with(state, mailbox, None)
 
     async def test_includes_fixed_treasury_summary_and_ai_instruction(self):
         manager = FakeManager([])
@@ -685,7 +787,7 @@ class PulseBootTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("没有新的 Bark", result)
         self.assertNotIn("【AI小金库】", result)
         self.assertNotIn("尚未设置开机核心记忆", result)
-        self.assertIn("【工具】", result)
+        self.assertNotIn("【可用工具】", result)
 
     async def test_core_pins_use_sort_order_instead_of_bucket_id(self):
         buckets = [
@@ -802,12 +904,12 @@ class PulseBootTests(unittest.IsolatedAsyncioTestCase):
             result = await server.pulse_boot()
 
         manager.list_all.assert_awaited_once_with(include_archive=True)
-        self.assertIn("【固定层：核心记忆目录】", result)
+        self.assertIn("【开机核心｜固定核心目录】", result)
         self.assertNotIn("自主选择最相关的 1–2 条", result)
         self.assertNotIn('recall(bucket_id="...", limit=1)', result)
         self.assertIn("bucket_id: pin-a", result)
         self.assertIn("bucket_id: pin-b", result)
-        self.assertIn("【信箱最新留言】", result)
+        self.assertIn("【上一窗口信箱｜原文】", result)
         self.assertIn("message_id: 18", result)
         self.assertIn("这是最新一封接力留言", result)
         self.assertNotIn("bucket_id: archive-new", result)
@@ -906,7 +1008,7 @@ class PulseBootTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("seal:", result)
 
     async def test_sealed_bucket_leaves_no_trace(self):
-        with tempfile.TemporaryDirectory() as root:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as root:
             manager = BucketManager({
                 "buckets_dir": root,
                 "embeddings": {"enabled": False},
@@ -987,9 +1089,9 @@ class PulseBootTests(unittest.IsolatedAsyncioTestCase):
         darkflow_status.assert_awaited_once()
         self.assertIn("【心念】", result)
         self.assertIn("我还是想把这件事弄明白。", result)
-        self.assertIn("【记忆共振】", result)
+        self.assertIn("【记忆回响】", result)
         self.assertIn("那次等她回来", result)
-        self.assertIn("【张力】", result)
+        self.assertIn("【内在牵引】", result)
         self.assertIn("只读", result)
         self.assertTrue(result.endswith("\nseal: test-seal"))
 

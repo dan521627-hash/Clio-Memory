@@ -186,7 +186,7 @@ class FeelingEchoTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("bucket_id: old-a", first)
         self.assertNotIn("bucket_id: old-b", first)
         self.assertNotIn("bucket_id: old-b", second)
-        self.assertIn("【信箱最新留言】", first)
+        self.assertIn("【上一窗口信箱｜原文】", first)
         self.assertIn("message_id: 18", second)
         self.assertIn("最新窗口总和", second)
         self.assertNotIn("seal:", first)

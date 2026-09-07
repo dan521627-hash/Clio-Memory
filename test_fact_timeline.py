@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import server
 from fact_timeline_store import FactTimelineStore
+from sqlite_utils import ClosingConnection
 
 
 def make_bucket(bucket_id: str, *, sealed: bool = False, archived: bool = False) -> dict:
@@ -28,7 +29,7 @@ class FactTimelineTests(unittest.IsolatedAsyncioTestCase):
     async def test_existing_database_schema_is_extended_without_changing_rows(self):
         with tempfile.TemporaryDirectory() as root:
             db_path = os.path.join(root, "timeline.sqlite3")
-            with sqlite3.connect(db_path) as connection:
+            with sqlite3.connect(db_path, factory=ClosingConnection) as connection:
                 connection.execute(
                     """
                     CREATE TABLE fact_versions (

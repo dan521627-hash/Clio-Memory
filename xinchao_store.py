@@ -15,6 +15,7 @@ from datetime import datetime, timedelta
 
 from rapidfuzz import fuzz
 
+from memory_upgrade import canonical_tendency, counter_tendency_labels
 from utils import beijing_now, now_iso
 from xinchao_engine import (
     PIPE_NAMES,
@@ -28,6 +29,45 @@ from xinchao_evaluator import XinchaoEvaluator
 
 
 logger = logging.getLogger("ombre_brain.xinchao")
+
+
+# The relationship scale describes the current climate between the AI and the
+# user.  It is deliberately derived from several pipes: wanting closeness can
+# coexist with hurt or anger, so no single pipe is allowed to define it.
+RELATIONSHIP_WARM_PIPES = {
+    "安心": 0.90,
+    "开心": 0.70,
+    "满足": 0.60,
+    "感动": 0.55,
+    "想靠近": 0.85,
+    "想黏着": 0.65,
+    "想分享": 0.50,
+    "想照顾她": 0.50,
+    "想让她开心": 0.50,
+    "想修复关系": 0.25,
+    "放松": 0.55,
+}
+
+RELATIONSHIP_COOL_PIPES = {
+    "生气": 1.00,
+    "委屈": 0.95,
+    "失落": 0.70,
+    "难过": 0.65,
+    "不安": 0.65,
+    "害怕": 0.60,
+    "醋": 0.55,
+    "孤独": 0.55,
+    "无语": 0.65,
+    "回避": 0.90,
+    "压抑": 0.60,
+    "想暂时独处": 0.80,
+    "取悦压力": 0.90,
+    "紧绷": 0.60,
+}
+
+RELATIONSHIP_RELEVANT_PIPES = frozenset(
+    (*RELATIONSHIP_WARM_PIPES, *RELATIONSHIP_COOL_PIPES)
+)
 
 
 class _ClosingConnection(sqlite3.Connection):
@@ -133,6 +173,15 @@ class XinchaoService:
         self.engine = XinchaoEngine(config)
         self.evaluator = XinchaoEvaluator(config)
         self.memory_resonance_provider = None
+        self.memory_echo_enabled = bool(
+            settings.get("memory_echo_enabled", settings.get("memory_resonance_enabled", True))
+        )
+        self.memory_echo_threshold = max(
+            0.0, min(1.0, float(settings.get("memory_echo_threshold", 0.68)))
+        )
+        self.memory_echo_max_ratio = max(
+            0.0, min(0.30, float(settings.get("memory_echo_max_ratio", 0.25)))
+        )
         self.task_context_provider = None
         self.thought_embedding_provider = None
         self._process_lock = asyncio.Lock()
@@ -274,6 +323,20 @@ class XinchaoService:
                 add_column(
                     "xinchao_events", "composites_json", "TEXT NOT NULL DEFAULT '[]'"
                 )
+            if "direct_deltas_json" not in event_columns:
+                add_column(
+                    "xinchao_events", "direct_deltas_json", "TEXT NOT NULL DEFAULT '{}'"
+                )
+            if "memory_echo_json" not in event_columns:
+                add_column(
+                    "xinchao_events", "memory_echo_json", "TEXT NOT NULL DEFAULT '{}'"
+                )
+            if "child_safe_update_json" not in event_columns:
+                add_column(
+                    "xinchao_events",
+                    "child_safe_update_json",
+                    "TEXT NOT NULL DEFAULT '{}'",
+                )
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS xinchao_thoughts (
@@ -308,10 +371,15 @@ class XinchaoService:
                 "feed_count": "INTEGER NOT NULL DEFAULT 0",
                 "last_fed_at": "TEXT",
                 "retired_at": "TEXT",
+                "linkage_fingerprint": "TEXT NOT NULL DEFAULT ''",
             }
             for column, declaration in thought_migrations.items():
                 if column not in thought_columns:
                     add_column("xinchao_thoughts", column, declaration)
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_xinchao_thought_linkage_fingerprint "
+                "ON xinchao_thoughts(linkage_fingerprint, first_seen DESC)"
+            )
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS xinchao_trace_revisions (
@@ -492,6 +560,221 @@ class XinchaoService:
                 "UPDATE xinchao_state SET pipes_updated_at="
                 "COALESCE(pipes_updated_at, last_event_at, updated_at) WHERE state_id=1"
             )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS xinchao_relationship_state (
+                    state_id INTEGER PRIMARY KEY CHECK (state_id = 1),
+                    auto_value REAL NOT NULL DEFAULT 100,
+                    user_value REAL,
+                    override_at TEXT,
+                    override_reason TEXT NOT NULL DEFAULT '',
+                    auto_updated_at TEXT,
+                    source_event_id INTEGER,
+                    source_summary TEXT NOT NULL DEFAULT '',
+                    evidence_json TEXT NOT NULL DEFAULT '{}',
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO xinchao_relationship_state (
+                    state_id, auto_value, updated_at
+                ) VALUES (1, 100, ?)
+                """,
+                (now_iso(),),
+            )
+
+    @staticmethod
+    def _relationship_event_is_relevant(deltas: dict | None) -> bool:
+        return any(
+            name in RELATIONSHIP_RELEVANT_PIPES and abs(float(value)) >= 0.001
+            for name, value in (deltas or {}).items()
+        )
+
+    def _relationship_auto_snapshot(self, pipes: dict | None) -> dict:
+        values = {
+            name: max(0.0, min(1.0, float((pipes or {}).get(name, 0.0) or 0.0)))
+            for name in PIPE_NAMES
+        }
+        baselines = self._baseline_floors()
+
+        def weighted_index(weights: dict[str, float]) -> tuple[float, list[dict]]:
+            # Only signals that are actually above their stable character floor
+            # participate in this moment's relationship climate.  Dividing one
+            # real event by every possible signal made almost every write look
+            # like 100, even when its source and deltas were correctly saved.
+            active_weight = 0.0
+            signals = []
+            weighted = 0.0
+            for name, weight in weights.items():
+                value = values.get(name, 0.0)
+                # Stable character floors are neutral sea level.  Only the
+                # movement above that floor changes the current relationship.
+                excess = max(0.0, value - float(baselines.get(name, 0.0) or 0.0))
+                weighted += excess * weight
+                if excess >= 0.001:
+                    active_weight += weight
+                if excess >= 0.025:
+                    signals.append(
+                        {
+                            "name": name,
+                            "value": round(value, 4),
+                            "above_baseline": round(excess, 4),
+                            "weight": round(weight, 3),
+                        }
+                    )
+            signals.sort(
+                key=lambda item: item["above_baseline"] * item["weight"],
+                reverse=True,
+            )
+            return min(1.0, weighted / (active_weight or 1.0)), signals[:4]
+
+        warmth, warm_signals = weighted_index(RELATIONSHIP_WARM_PIPES)
+        strain, cool_signals = weighted_index(RELATIONSHIP_COOL_PIPES)
+        value = round(max(0.0, min(200.0, 100.0 + 110.0 * warmth - 125.0 * strain)), 1)
+        if value >= 170:
+            label = "炽热相依"
+        elif value >= 140:
+            label = "亲密明亮"
+        elif value >= 115:
+            label = "温和靠近"
+        elif value >= 90:
+            label = "平稳相处"
+        elif value >= 70:
+            label = "有些紧绷"
+        elif value >= 45:
+            label = "关系降温"
+        else:
+            label = "明显疏离"
+        return {
+            "value": value,
+            "label": label,
+            "baseline": 100.0,
+            "minimum": 0.0,
+            "maximum": 200.0,
+            "warmth_index": round(warmth, 4),
+            "strain_index": round(strain, 4),
+            "warm_signals": warm_signals,
+            "strain_signals": cool_signals,
+        }
+
+    def _update_relationship_state_sync(
+        self,
+        connection: sqlite3.Connection,
+        pipes: dict,
+        deltas: dict | None,
+        *,
+        source_event_id: int | None = None,
+        source_summary: str = "",
+        moment: datetime | None = None,
+    ) -> dict:
+        """Refresh automatic climate and release a manual current-only override."""
+        snapshot = self._relationship_auto_snapshot(pipes)
+        if not self._relationship_event_is_relevant(deltas):
+            return snapshot
+        timestamp = (moment or beijing_now()).isoformat(timespec="seconds")
+        evidence = {
+            "warm_signals": snapshot["warm_signals"],
+            "strain_signals": snapshot["strain_signals"],
+            "deltas": {
+                name: round(float(value), 4)
+                for name, value in (deltas or {}).items()
+                if name in RELATIONSHIP_RELEVANT_PIPES and abs(float(value)) >= 0.001
+            },
+        }
+        connection.execute(
+            """
+            UPDATE xinchao_relationship_state SET auto_value=?, user_value=NULL,
+                override_at=NULL, override_reason='', auto_updated_at=?,
+                source_event_id=?, source_summary=?, evidence_json=?, updated_at=?
+            WHERE state_id=1
+            """,
+            (
+                snapshot["value"],
+                timestamp,
+                int(source_event_id) if source_event_id else None,
+                str(source_summary or "")[:240],
+                json.dumps(evidence, ensure_ascii=False),
+                timestamp,
+            ),
+        )
+        return snapshot
+
+    def _relationship_status_sync(self, pipes: dict | None = None) -> dict:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM xinchao_relationship_state WHERE state_id=1"
+            ).fetchone()
+        auto = self._relationship_auto_snapshot(pipes or {})
+        stored = dict(row) if row else {}
+        user_value = stored.get("user_value")
+        manual = user_value is not None
+        effective_value = round(float(user_value), 1) if manual else auto["value"]
+        effective = self._relationship_auto_snapshot(pipes or {})
+        effective["value"] = effective_value
+        if manual:
+            if effective_value >= 170:
+                effective["label"] = "炽热相依"
+            elif effective_value >= 140:
+                effective["label"] = "亲密明亮"
+            elif effective_value >= 115:
+                effective["label"] = "温和靠近"
+            elif effective_value >= 90:
+                effective["label"] = "平稳相处"
+            elif effective_value >= 70:
+                effective["label"] = "有些紧绷"
+            elif effective_value >= 45:
+                effective["label"] = "关系降温"
+            else:
+                effective["label"] = "明显疏离"
+        try:
+            saved_evidence = json.loads(stored.get("evidence_json") or "{}")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            saved_evidence = {}
+        effective.update(
+            {
+                "name": "关系刻度",
+                "mode": "manual_current" if manual else "automatic",
+                "automatic_value": auto["value"],
+                "effective_value": effective_value,
+                "manual_value": round(float(user_value), 1) if manual else None,
+                "manual_reason": str(stored.get("override_reason") or ""),
+                "manual_at": stored.get("override_at"),
+                "source_event_id": stored.get("source_event_id"),
+                "source_summary": str(stored.get("source_summary") or ""),
+                "source_evidence": saved_evidence,
+                "auto_updated_at": stored.get("auto_updated_at"),
+                "manual_is_current_only": True,
+                "manual_release_rule": "下一次涉及关系的真实写入，或主动恢复自动判断",
+            }
+        )
+        return effective
+
+    def _set_relationship_override_sync(self, value: float, reason: str = "") -> dict:
+        safe_value = round(max(0.0, min(200.0, float(value))), 1)
+        timestamp = now_iso()
+        with self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE xinchao_relationship_state SET user_value=?, override_at=?,
+                    override_reason=?, updated_at=? WHERE state_id=1
+                """,
+                (safe_value, timestamp, str(reason or "")[:240], timestamp),
+            )
+        return self._relationship_status_sync(self._preview_sync(beijing_now()).get("pipes"))
+
+    def _restore_relationship_auto_sync(self) -> dict:
+        timestamp = now_iso()
+        with self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE xinchao_relationship_state SET user_value=NULL,
+                    override_at=NULL, override_reason='', updated_at=? WHERE state_id=1
+                """,
+                (timestamp,),
+            )
+        return self._relationship_status_sync(self._preview_sync(beijing_now()).get("pipes"))
 
     @staticmethod
     def _fingerprint(content: str) -> str:
@@ -622,6 +905,20 @@ class XinchaoService:
             ).fetchone()
             if duplicate:
                 return {"status": "duplicate", "event_id": int(duplicate["event_id"])}
+            trace_duplicate = connection.execute(
+                """
+                SELECT canonical_tag FROM xinchao_thoughts
+                WHERE linkage_fingerprint=? AND first_seen>=? AND thought_kind='trace'
+                ORDER BY first_seen ASC LIMIT 1
+                """,
+                (fingerprint, cutoff),
+            ).fetchone()
+            if trace_duplicate:
+                return {
+                    "status": "duplicate",
+                    "reason": "trace_linkage",
+                    "canonical_tag": str(trace_duplicate["canonical_tag"]),
+                }
             previous = None
             if correction_key_hash:
                 previous = connection.execute(
@@ -770,6 +1067,14 @@ class XinchaoService:
                         moment.isoformat(timespec="seconds"),
                     ),
                 )
+                self._update_relationship_state_sync(
+                    connection,
+                    pipes,
+                    reversal,
+                    source_event_id=int(event_id),
+                    source_summary="旧写入影响已撤回，并按修正后的内容重新判断",
+                    moment=moment,
+                )
             connection.execute("DELETE FROM xinchao_darkflow WHERE slot_id=1")
             connection.execute(
                 """
@@ -914,7 +1219,18 @@ class XinchaoService:
         """Return whether the open cycle has crossed the inactivity boundary."""
         if not state or not bool(state["cycle_open"]):
             return False
-        if bool(state["static_ready"]):
+        # ``static_ready`` is also used by the evaluator to say that a write is
+        # narratively complete. That must not be confused with real elapsed
+        # silence: otherwise the post-tool activity callback can move a freshly
+        # written mailbox into a new, mailbox-less cycle a few seconds later.
+        # Only an explicit zero-hour test/configuration may bypass the normal
+        # inactivity boundary.
+        immediate_stage = bool(
+            state["static_ready"]
+            and self.darkflow_stage_hours
+            and self.darkflow_stage_hours[0] <= 0
+        )
+        if immediate_stage:
             return True
         raw = state["last_presence_at"] or state["last_event_at"]
         if not raw:
@@ -1041,6 +1357,7 @@ class XinchaoService:
         source_ref: str = "",
         thought_kind: str = "inner",
         linkage: dict | None = None,
+        linkage_fingerprint: str = "",
     ) -> dict:
         row = connection.execute(
             "SELECT * FROM xinchao_thoughts WHERE canonical_tag=?", (canonical_tag,)
@@ -1081,11 +1398,11 @@ class XinchaoService:
             """
             INSERT INTO xinchao_thoughts (
                 canonical_tag, event_tag, thought_kind, first_seen, last_seen,
-                occurrence_count, status, floor_json, linkage_json, expires_at,
+                occurrence_count, status, floor_json, linkage_json, linkage_fingerprint, expires_at,
                 thought_text, tone, intensity, reason, source_event_id,
                 source_tool, source_ref, privacy, resolved_at, updated_at,
                 feed_count, last_fed_at, retired_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'inner_only', NULL, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'inner_only', NULL, ?, ?, ?, ?)
             ON CONFLICT(canonical_tag) DO UPDATE SET
                 event_tag=excluded.event_tag,
                 thought_kind=excluded.thought_kind,
@@ -1095,6 +1412,7 @@ class XinchaoService:
                 status=excluded.status,
                 floor_json=excluded.floor_json,
                 linkage_json=excluded.linkage_json,
+                linkage_fingerprint=CASE WHEN excluded.linkage_fingerprint<>'' THEN excluded.linkage_fingerprint ELSE xinchao_thoughts.linkage_fingerprint END,
                 expires_at=excluded.expires_at,
                 thought_text=CASE WHEN excluded.thought_text<>'' THEN excluded.thought_text ELSE xinchao_thoughts.thought_text END,
                 tone=excluded.tone,
@@ -1120,6 +1438,7 @@ class XinchaoService:
                 status,
                 json.dumps(floor, ensure_ascii=False),
                 json.dumps(linkage or {}, ensure_ascii=False),
+                str(linkage_fingerprint)[:64],
                 expires_at,
                 stored_thought_text,
                 tone if tone in {"positive", "negative", "mixed"} else "mixed",
@@ -1299,12 +1618,21 @@ class XinchaoService:
                     processed_at,
                 ),
             )
+            self._update_relationship_state_sync(
+                connection,
+                pipes,
+                evaluation.get("pipes", {}),
+                source_event_id=int(event_id),
+                source_summary=evaluation.get("event", ""),
+                moment=moment,
+            )
             connection.execute(
                 """
                 UPDATE xinchao_events SET content=NULL, event_summary=?, event_tag=?,
                     context_card=?, cycle_id=?, canonical_tag=?, severity=?,
-                    deltas_json=?, signals_json=?, composites_json=?, narrative_complete=?,
-                    quality_note=?, status='applied', error='', processed_at=?
+                    deltas_json=?, direct_deltas_json=?, memory_echo_json='{}',
+                    signals_json=?, composites_json=?, narrative_complete=?,
+                    quality_note=?, child_safe_update_json=?, status='applied', error='', processed_at=?
                     , handoff_ready=?
                 WHERE event_id=?
                 """,
@@ -1316,10 +1644,14 @@ class XinchaoService:
                     canonical_tag,
                     float(evaluation["severity"]),
                     json.dumps(evaluation.get("pipes", {}), ensure_ascii=False),
+                    json.dumps(evaluation.get("pipes", {}), ensure_ascii=False),
                     json.dumps(evaluation.get("signals", []), ensure_ascii=False),
                     json.dumps(composites, ensure_ascii=False),
                     int(bool(evaluation.get("narrative_complete", True))),
                     evaluation.get("quality_note", ""),
+                    json.dumps(
+                        evaluation.get("child_safe_update") or {}, ensure_ascii=False
+                    ),
                     processed_at,
                     int(handoff_ready),
                     int(event_id),
@@ -1357,7 +1689,325 @@ class XinchaoService:
             "narrative_complete": evaluation.get("narrative_complete", True),
             "handoff_ready": handoff_ready,
             "quality_note": evaluation.get("quality_note", ""),
+            "direct_deltas": evaluation.get("pipes", {}),
         }
+
+    @staticmethod
+    def _child_safe_nursery_source(source_tool: object) -> tuple[str, str] | None:
+        """Map only real, approved Anima writes to nursery source identities."""
+
+        return {
+            "mailbox": ("mailbox", "mailbox_event"),
+            "hold": ("memory", "anima_memory"),
+            "grow": ("memory", "anima_memory"),
+            "manager_memory": ("memory", "anima_memory"),
+            "manager_append": ("memory", "anima_memory"),
+            "manager_create": ("memory", "anima_memory"),
+            # Compatibility for rows written before manager-side source names
+            # were normalized.
+            "memory": ("memory", "anima_memory"),
+        }.get(str(source_tool or ""))
+
+    @classmethod
+    def _child_safe_nursery_source_reference(cls, row: sqlite3.Row) -> dict | None:
+        source = cls._child_safe_nursery_source(row["source_tool"])
+        source_ref = str(row["source_ref"] or "").strip()
+        created_at = str(row["created_at"] or "").strip()
+        if source is None or not source_ref or not created_at:
+            return None
+        source_kind, source_type = source
+        return {
+            "source_key": f"{source_kind}:{source_ref}",
+            "source_version": f"{created_at}#{int(row['event_id'])}"[:80],
+            "source_type": source_type,
+        }
+
+    def child_safe_source_reference_for_nursery(self, event_id: int) -> dict | None:
+        """Return provenance needed to correct a previously safe nursery event.
+
+        It deliberately excludes adult content and remains available after a
+        correction marks the original Anima event as superseded.
+        """
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT event_id, created_at, source_tool, source_ref, status,
+                       child_safe_update_json
+                FROM xinchao_events WHERE event_id=?
+                """,
+                (int(event_id),),
+            ).fetchone()
+        if not row or str(row["status"]) not in {"applied", "superseded"}:
+            return None
+        try:
+            update = json.loads(str(row["child_safe_update_json"] or "{}"))
+        except (TypeError, ValueError):
+            return None
+        if not XinchaoEvaluator._safe_child_safe_update(update, ""):
+            return None
+        reference = self._child_safe_nursery_source_reference(row)
+        return {**reference, "status": str(row["status"])} if reference else None
+
+    def child_safe_source_references_for_nursery(self, source_key: str) -> list[dict]:
+        """Return every safe, canonical version belonging to one source key.
+
+        Deletion and expiry need to invalidate historical versions too.  This
+        deliberately returns only opaque nursery provenance, never an adult
+        event body or its child-safe summary.
+        """
+        target = str(source_key or "").strip()
+        if not target:
+            return []
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT event_id, created_at, source_tool, source_ref, status,
+                       child_safe_update_json
+                FROM xinchao_events
+                WHERE status IN ('applied', 'superseded')
+                ORDER BY event_id ASC
+                """
+            ).fetchall()
+        references = []
+        for row in rows:
+            reference = self._child_safe_nursery_source_reference(row)
+            if not reference or reference["source_key"] != target:
+                continue
+            try:
+                update = json.loads(str(row["child_safe_update_json"] or "{}"))
+            except (TypeError, ValueError):
+                continue
+            if XinchaoEvaluator._safe_child_safe_update(update, ""):
+                references.append({**reference, "status": str(row["status"])})
+        return references
+
+    def child_safe_event_for_nursery(self, event_id: int) -> dict | None:
+        """Return only Anima's dedicated, validated nursery-safe event envelope.
+
+        The caller still needs an explicit child target and a user-authorized
+        coordinator action before it can cross into the nursery store.
+        """
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT event_id, created_at, source_tool, source_ref, status,
+                       child_safe_update_json
+                FROM xinchao_events WHERE event_id=?
+                """,
+                (int(event_id),),
+            ).fetchone()
+        if not row or str(row["status"]) != "applied":
+            return None
+        reference = self._child_safe_nursery_source_reference(row)
+        if not reference:
+            return None
+        try:
+            update = json.loads(str(row["child_safe_update_json"] or "{}"))
+        except (TypeError, ValueError):
+            return None
+        safe_update = XinchaoEvaluator._safe_child_safe_update(update, "")
+        if not safe_update:
+            return None
+        created_at = str(row["created_at"] or "").strip()
+        return {
+            "source_key": reference["source_key"],
+            "source_version": reference["source_version"],
+            "category": safe_update["category"],
+            "child_safe_summary": safe_update["summary"],
+            "occurred_at": created_at[:64],
+        }
+
+    @staticmethod
+    def _bounded_memory_echo_deltas(
+        direct_deltas: dict | None,
+        recalled_deltas: dict | None,
+        max_ratio: float,
+    ) -> dict[str, float]:
+        """Keep recalled memory secondary to the write that awakened it."""
+        direct_total = sum(
+            abs(float(value))
+            for name, value in (direct_deltas or {}).items()
+            if name in PIPE_NAMES
+        )
+        remaining = min(0.24, direct_total * max(0.0, min(0.30, max_ratio)))
+        if remaining < 0.001:
+            return {}
+        result: dict[str, float] = {}
+        ordered = sorted(
+            (
+                (name, max(-0.20, min(0.20, float(value))))
+                for name, value in (recalled_deltas or {}).items()
+                if name in PIPE_NAMES
+            ),
+            key=lambda item: abs(item[1]),
+            reverse=True,
+        )
+        for name, value in ordered:
+            if remaining < 0.001:
+                break
+            value = max(-remaining, min(remaining, value))
+            if abs(value) >= 0.001:
+                result[name] = round(value, 4)
+                remaining = round(remaining - abs(value), 4)
+        return result
+
+    @staticmethod
+    def _resonance_is_same_write(event: dict, item: dict) -> bool:
+        source_ref = str(event.get("source_ref") or "").strip()
+        if not source_ref:
+            return False
+        if str(item.get("source") or "") == "memory":
+            return source_ref == str(item.get("bucket_id") or "").strip()
+        if str(item.get("source") or "") == "mailbox":
+            return source_ref == str(item.get("message_id") or "").strip()
+        return False
+
+    def _apply_memory_echo_sync(
+        self,
+        event_id: int,
+        resonance: dict,
+        echo_deltas: dict,
+    ) -> dict:
+        if not echo_deltas:
+            return {"status": "none"}
+        moment = beijing_now()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            event = connection.execute(
+                "SELECT * FROM xinchao_events WHERE event_id=?", (int(event_id),)
+            ).fetchone()
+            state = connection.execute(
+                "SELECT * FROM xinchao_state WHERE state_id=1"
+            ).fetchone()
+            if not event or str(event["status"]) != "applied" or not state:
+                return {"status": "missing"}
+            try:
+                direct = json.loads(event["direct_deltas_json"] or event["deltas_json"] or "{}")
+            except (TypeError, ValueError, json.JSONDecodeError):
+                direct = {}
+            try:
+                previous_echo = json.loads(event["memory_echo_json"] or "{}")
+            except (TypeError, ValueError, json.JSONDecodeError):
+                previous_echo = {}
+            if previous_echo:
+                return {"status": "unchanged", "memory_echo": previous_echo}
+            if int(event["cycle_id"] or 0) != int(state["cycle_id"] or 0):
+                return {"status": "stale"}
+            thoughts = self._active_thoughts_sync(connection, moment)
+            floors = self._combined_floors(thoughts)
+            pipes = json.loads(state["pipes_json"] or "{}")
+            pipes = self.engine.apply_event(pipes, echo_deltas, floors)
+            combined = dict(direct)
+            for name, value in echo_deltas.items():
+                combined[name] = round(float(combined.get(name, 0.0)) + float(value), 4)
+            composites = infer_composite_states(pipes)
+            payload = {
+                "label": "记忆回响",
+                "source": str(resonance.get("source") or "memory"),
+                "source_id": str(
+                    resonance.get("bucket_id") or resonance.get("message_id") or ""
+                ),
+                "source_name": str(resonance.get("name") or "")[:80],
+                "excerpt": str(resonance.get("excerpt") or "")[:240],
+                "relevance": round(float(resonance.get("relevance") or 0.0), 4),
+                "deltas": echo_deltas,
+                "parent_event_id": int(event_id),
+            }
+            connection.execute(
+                """
+                UPDATE xinchao_state SET pipes_json=?, pipes_updated_at=?, updated_at=?,
+                    version=version+1 WHERE state_id=1
+                """,
+                (
+                    json.dumps(pipes, ensure_ascii=False),
+                    moment.isoformat(timespec="seconds"),
+                    moment.isoformat(timespec="seconds"),
+                ),
+            )
+            self._update_relationship_state_sync(
+                connection,
+                pipes,
+                echo_deltas,
+                source_event_id=int(event_id),
+                source_summary=(
+                    "记忆回响：" + str(resonance.get("name") or resonance.get("excerpt") or "")
+                )[:240],
+                moment=moment,
+            )
+            connection.execute(
+                """
+                UPDATE xinchao_events SET deltas_json=?, memory_echo_json=?,
+                    composites_json=? WHERE event_id=?
+                """,
+                (
+                    json.dumps(combined, ensure_ascii=False),
+                    json.dumps(payload, ensure_ascii=False),
+                    json.dumps(composites, ensure_ascii=False),
+                    int(event_id),
+                ),
+            )
+            self._journal_sync(
+                connection,
+                "memory_echo_applied",
+                cycle_id=int(state["cycle_id"] or 0),
+                source=str(event["source_tool"] or "write"),
+                details=payload,
+            )
+        return {"status": "applied", "memory_echo": payload, "pipes": pipes}
+
+    async def _process_memory_echo(self, event_id: int, result: dict) -> dict:
+        """Recall once after a direct write; never recursively recall from an echo."""
+        if not self.memory_echo_enabled or self.memory_resonance_provider is None:
+            return {"status": "disabled"}
+        event = await asyncio.to_thread(self._event_sync, event_id)
+        if not event or str(event.get("source_tool") or "") not in {
+            "mailbox", "hold", "grow", "trace_append",
+            "manager_memory", "manager_append", "manager_create", "memory",
+        }:
+            return {"status": "ineligible"}
+        direct_deltas = result.get("direct_deltas") or {}
+        if not direct_deltas:
+            return {"status": "no_direct_change"}
+        state = await self.status()
+        context = {
+            "event_id": int(event_id),
+            "source_tool": event.get("source_tool", ""),
+            "source_ref": event.get("source_ref", ""),
+            "event_summary": result.get("event_summary", ""),
+            "context_card": result.get("context_card", ""),
+            "pipe_deltas": direct_deltas,
+        }
+        try:
+            candidates = await self.memory_resonance_provider(state, [context])
+        except Exception as error:
+            logger.warning("Memory echo lookup unavailable for event %s: %s", event_id, error)
+            return {"status": "unavailable", "error": str(error)}
+        resonance = next(
+            (
+                item for item in (candidates or [])
+                if float(item.get("relevance") or 0.0) >= self.memory_echo_threshold
+                and str(item.get("excerpt") or "").strip()
+                and not self._resonance_is_same_write(event, item)
+            ),
+            None,
+        )
+        if not resonance:
+            return {"status": "no_match"}
+        try:
+            recalled = await self.evaluator.evaluate_trace_effect(
+                str(resonance.get("excerpt") or "")
+            )
+        except Exception as error:
+            logger.warning("Memory echo evaluation unavailable for event %s: %s", event_id, error)
+            return {"status": "unavailable", "error": str(error)}
+        echo_deltas = self._bounded_memory_echo_deltas(
+            direct_deltas,
+            recalled.get("pipes") if isinstance(recalled, dict) else {},
+            self.memory_echo_max_ratio,
+        )
+        return await asyncio.to_thread(
+            self._apply_memory_echo_sync, event_id, resonance, echo_deltas
+        )
 
     async def _process_event(self, event_id: int) -> dict:
         event = await asyncio.to_thread(self._event_sync, event_id)
@@ -1496,6 +2146,10 @@ class XinchaoService:
                 self._supersede_handoff_for_write_sync, queued["event_id"]
             )
             result = await self._process_event(queued["event_id"])
+            if result.get("status") == "applied":
+                echo = await self._process_memory_echo(queued["event_id"], result)
+                if echo.get("status") == "applied":
+                    result["memory_echo"] = echo.get("memory_echo")
             result["superseded"] = superseded
             if correction.get("status") == "rolled_back":
                 result["correction"] = correction
@@ -1536,6 +2190,8 @@ class XinchaoService:
         if len(raw_text) > 240:
             return {"status": "ignored", "reason": "念痕不能超过 240 个字符"}
         safe_deltas = self._safe_trace_deltas(deltas)
+        linkage_fingerprint = self._fingerprint(raw_text)
+        duplicate_reason = ""
         trace_tag = self._canonical_tag(tag or raw_text[:40])
         # Every AI-written trace is a separate temporal record.  The semantic
         # event_tag still groups recurring themes, while canonical_tag remains
@@ -1544,6 +2200,31 @@ class XinchaoService:
         canonical_tag = f"trace:{trace_tag[:48]}:{trace_identity}"[:80]
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            cutoff = (moment - timedelta(hours=self.exact_dedupe_hours)).isoformat(
+                timespec="seconds"
+            )
+            earlier_event = connection.execute(
+                """
+                SELECT event_id FROM xinchao_events
+                WHERE fingerprint=? AND created_at>=?
+                  AND status IN ('pending', 'processing', 'applied', 'duplicate')
+                ORDER BY created_at ASC, event_id ASC LIMIT 1
+                """,
+                (linkage_fingerprint, cutoff),
+            ).fetchone()
+            earlier_trace = connection.execute(
+                """
+                SELECT canonical_tag FROM xinchao_thoughts
+                WHERE linkage_fingerprint=? AND first_seen>=? AND thought_kind='trace'
+                ORDER BY first_seen ASC LIMIT 1
+                """,
+                (linkage_fingerprint, cutoff),
+            ).fetchone()
+            if earlier_event or earlier_trace:
+                # Keep the later private record, but never make the same
+                # wording push the emotional state a second time.
+                safe_deltas = {}
+                duplicate_reason = "earlier_event" if earlier_event else "earlier_trace"
             state = connection.execute(
                 "SELECT * FROM xinchao_state WHERE state_id=1"
             ).fetchone()
@@ -1583,6 +2264,7 @@ class XinchaoService:
                 source_ref=source_ref,
                 thought_kind="trace",
                 linkage=safe_deltas,
+                linkage_fingerprint=linkage_fingerprint,
             )
             thoughts = self._active_thoughts_sync(connection, moment)
             updated = self.engine.apply_event(
@@ -1621,6 +2303,7 @@ class XinchaoService:
                     "pipe_deltas": safe_deltas,
                     "event_summary": "一条念痕牵动了内在状态",
                     "private": True,
+                    "linkage_deduplicated": bool(duplicate_reason),
                 },
             )
         item = dict(saved)
@@ -1637,6 +2320,7 @@ class XinchaoService:
             "cycle_id": cycle_id,
             "privacy": "inner_only",
             "web_mutation": False,
+            "linkage_deduplicated": bool(duplicate_reason),
         }
 
     def _update_thought_trace_sync(
@@ -1720,7 +2404,7 @@ class XinchaoService:
                 """
                 UPDATE xinchao_thoughts SET
                     event_tag=?, thought_text=?, tone=?, intensity=?, reason=?,
-                    linkage_json=?, source_tool=?, source_ref=?, updated_at=?,
+                    linkage_json=?, linkage_fingerprint=?, source_tool=?, source_ref=?, updated_at=?,
                     resolved_at=NULL, status=CASE WHEN status='resolved' THEN 'flash' ELSE status END
                 WHERE canonical_tag=? AND thought_kind='trace'
                 """,
@@ -1731,6 +2415,7 @@ class XinchaoService:
                     max(0.0, min(1.0, float(intensity))),
                     str(reason).strip()[:240],
                     json.dumps(new_linkage, ensure_ascii=False),
+                    self._fingerprint(raw_text),
                     "mcp:thought_trace_update",
                     str(source_ref)[:160],
                     moment.isoformat(timespec="seconds"),
@@ -1954,7 +2639,8 @@ class XinchaoService:
                 """
                 SELECT event_id, created_at, source_tool, source_ref,
                        event_summary, event_tag, context_card, severity,
-                       deltas_json, signals_json, composites_json, processed_at
+                       deltas_json, direct_deltas_json, memory_echo_json,
+                       signals_json, composites_json, processed_at
                 FROM xinchao_events
                 WHERE status='applied' AND deltas_json NOT IN ('', '{}')
                   AND source_tool IN (
@@ -1976,6 +2662,8 @@ class XinchaoService:
             item = dict(row)
             for source_key, target_key, default in (
                 ("deltas_json", "pipe_deltas", {}),
+                ("direct_deltas_json", "direct_pipe_deltas", {}),
+                ("memory_echo_json", "memory_echo", {}),
                 ("signals_json", "signals", []),
                 ("composites_json", "composite_states", []),
             ):
@@ -2053,6 +2741,31 @@ class XinchaoService:
             + timedelta(hours=stages[stage_index])
         ).isoformat(timespec="seconds")
 
+    @staticmethod
+    def _mailbox_anchor_sync(connection, cycle_id: int) -> dict | None:
+        """Return the live mailbox write that opened this interaction cycle.
+
+        Presence, reads, and non-mailbox writes may reset activity and cancel
+        unfinished output, but they must never make a cycle eligible for the
+        silence pipeline. The mailbox write is the only authoritative window
+        boundary, so eligibility is derived from the applied event ledger
+        instead of from ``cycle_origin`` or the latest mailbox preview.
+        """
+        row = connection.execute(
+            """
+            SELECT event_id, created_at, source_ref, event_summary, event_tag
+            FROM xinchao_events
+            WHERE cycle_id=?
+              AND source_tool='mailbox'
+              AND status='applied'
+              AND COALESCE(superseded_by_event_id, 0)=0
+            ORDER BY created_at DESC, event_id DESC
+            LIMIT 1
+            """,
+            (int(cycle_id),),
+        ).fetchone()
+        return dict(row) if row else None
+
     def _preview_sync(self, moment: datetime) -> dict:
         with self._connect() as connection:
             state = connection.execute(
@@ -2062,6 +2775,10 @@ class XinchaoService:
             obsessions = [item for item in thoughts if item["status"] == "obsession"]
             floors = self._combined_floors(thoughts)
             if state["cycle_open"]:
+                mailbox_anchor = self._mailbox_anchor_sync(
+                    connection, int(state["cycle_id"])
+                )
+                silence_eligible = bool(mailbox_anchor)
                 last_event_raw = state["last_event_at"] or state["last_presence_at"]
                 last_activity_raw = state["last_presence_at"] or last_event_raw
                 last_event = parse_timestamp(last_event_raw)
@@ -2079,7 +2796,9 @@ class XinchaoService:
                     and self.darkflow_stage_hours
                     and self.darkflow_stage_hours[0] <= 0
                 )
-                static_ready = inactivity_seconds >= inactivity_boundary or immediate_stage
+                static_ready = silence_eligible and (
+                    inactivity_seconds >= inactivity_boundary or immediate_stage
+                )
                 absence_started = (
                     last_activity
                     if immediate_stage and inactivity_seconds < inactivity_boundary
@@ -2145,8 +2864,16 @@ class XinchaoService:
                     "event_summary": state["last_event_summary"],
                     "cycle_origin": cycle_origin,
                     "interaction_phase": interaction_phase,
+                    "silence_eligible": silence_eligible,
+                    "mailbox_anchor": mailbox_anchor,
+                    "silence_block_reason": (
+                        "等待本轮信箱写入；开机、读取和其他操作不会启动沉默计时"
+                        if not silence_eligible
+                        else ""
+                    ),
                     "silence_nudge_due": (
-                        not static_ready
+                        silence_eligible
+                        and not static_ready
                         and inactivity_seconds >= int(self.presence_nudge_after_hours * 3600)
                     ),
                     "silence_to_absence_seconds": int(
@@ -2186,6 +2913,9 @@ class XinchaoService:
                 "thoughts": thoughts,
                 "sleep_stage": "awake",
                 "darkflow_stage": 0,
+                "silence_eligible": False,
+                "mailbox_anchor": None,
+                "silence_block_reason": "当前窗口已交付，等待下一次信箱写入",
             }
 
     @staticmethod
@@ -2399,6 +3129,12 @@ class XinchaoService:
             preview = await asyncio.to_thread(self._preview_sync, moment)
             if not preview.get("available") or preview.get("repeated"):
                 return {"status": "idle"}
+            if not preview.get("silence_eligible"):
+                return {
+                    "status": "idle",
+                    "reason": "mailbox_write_required",
+                    "cycle_id": int(preview.get("cycle_id", 0)),
+                }
             if not preview.get("static_ready"):
                 return {"status": "waiting", "phase": "active", "stage_index": 0}
             target_stage = self._target_stage(
@@ -2481,6 +3217,9 @@ class XinchaoService:
                     timing=timing,
                     memory_resonance=memory_resonance,
                     unresolved_tasks=[],
+                    relationship_context=self._relationship_status_sync(
+                        preview.get("pipes")
+                    ),
                 )
                 if isinstance(generated, dict):
                     generated_text = generated.get("text", "")
@@ -2795,131 +3534,20 @@ class XinchaoService:
             self._discard_darkflow_sync, cycle_id, reason
         )
 
-    def _acknowledge_seen_sync(self, moment: datetime) -> dict:
-        """Partly satisfy response-related drives without starting a timer."""
-        with self._connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            state = connection.execute(
-                "SELECT * FROM xinchao_state WHERE state_id=1"
-            ).fetchone()
-            if not state:
-                return {"status": "missing"}
-            previous_cycle_id = int(state["cycle_id"])
-            next_cycle_id = previous_cycle_id + 1
-            stamp = moment.isoformat(timespec="seconds")
-            thoughts = self._active_thoughts_sync(connection, moment)
-            floors = self._combined_floors(thoughts)
-            was_in_absence = self._state_is_in_absence(state, moment)
-            pipes = self._baseline_floors() if was_in_absence else json.loads(state["pipes_json"])
-            if not was_in_absence and state["cycle_open"] and state["last_event_at"]:
-                try:
-                    pipes = self.engine.evolve(
-                        pipes,
-                        self._state_pipe_anchor(state, state["last_event_at"]),
-                        moment,
-                        floors,
-                        plateaus=self._active_plateaus_sync(connection, moment),
-                        growth_origin=state["last_event_at"],
-                    )
-                except (TypeError, ValueError):
-                    logger.warning(
-                        "Could not evolve state before acknowledgement; using stored values"
-                    )
-
-            # Being seen eases the need for a response, but it does not erase
-            # unrelated feelings or personality baselines.
-            retain_excess = {
-                "想知道她在干嘛": 0.55,
-                "想靠近": 0.72,
-                "想黏着": 0.68,
-                "想分享": 0.80,
-            }
-            changed = {}
-            for name, retention in retain_excess.items():
-                floor = float(floors.get(name, 0.0))
-                before = max(floor, float(pipes.get(name, 0.0)))
-                after = floor + (before - floor) * retention
-                pipes[name] = round(after, 6)
-                changed[name] = round(after - before, 6)
-            pipes = self.engine.apply_event(
-                pipes,
-                {"开心": 0.04, "满足": 0.06},
-                floors,
-            )
-            self._set_plateaus_sync(
-                connection,
-                list(retain_excess),
-                moment,
-                source="acknowledged_seen",
-            )
-            pending_darkflow = connection.execute(
-                "SELECT status FROM xinchao_darkflow "
-                "WHERE slot_id=1 AND cycle_id=?",
-                (previous_cycle_id,),
-            ).fetchone()
-            darkflow_carried = bool(
-                pending_darkflow and pending_darkflow["status"] == "pending"
-            )
-            # Any explicit action belongs to the active window and invalidates
-            # every product created by the old silence period.
-            connection.execute(
-                "DELETE FROM xinchao_darkflow WHERE slot_id=1 AND cycle_id=?",
-                (previous_cycle_id,),
-            )
-            darkflow_carried = False
-            connection.execute(
-                """
-                UPDATE xinchao_state SET cycle_id=?, cycle_open=1,
-                    last_event_at=?, last_presence_at=?, pipes_updated_at=?, cycle_origin='acknowledgement',
-                    last_event_summary='', last_event_tag='', pipes_json=?,
-                    sleep_stage='awake', sleep_started_at=NULL, deep_sleep_at=NULL,
-                    darkflow_stage=0, last_darkflow_at=NULL,
-                    darkflow_retry_at=NULL, darkflow_failures=0,
-                    static_ready=0, static_started_at=NULL,
-                    updated_at=?, version=version+1
-                WHERE state_id=1
-                """,
-                (
-                    next_cycle_id,
-                    stamp,
-                    stamp,
-                    stamp,
-                    json.dumps(pipes, ensure_ascii=False),
-                    now_iso(),
-                ),
-            )
-            self._journal_sync(
-                connection,
-                "behavior_acknowledged",
-                cycle_id=next_cycle_id,
-                source="manager",
-                from_stage=str(state["sleep_stage"] or "awake"),
-                to_stage="awake",
-                details={
-                    "partially_settled": True,
-                    "changed_pipes": len(changed),
-                    "positive_response": 0.10,
-                    "pending_darkflow_carried": darkflow_carried,
-                    "reset_silence_effects": was_in_absence,
-                },
-            )
-        return {
-            "status": "acknowledged",
-            "previous_cycle_id": previous_cycle_id,
-            "cycle_id": next_cycle_id,
-            "active_started_at": stamp,
-            "silence_started_at": None,
-            "pipes": pipes,
-            "pending_darkflow_carried": darkflow_carried,
-        }
-
     async def acknowledge_seen(self) -> dict:
-        """Acknowledge an outward message without creating a memory event."""
+        """Compatibility shim; the manager records acknowledgement separately.
+
+        Acknowledging a push is a display action, not a memory write or a
+        presence event.  Keeping this method side-effect free prevents older
+        callers from reopening a cycle, clearing darkflow, or changing pipes.
+        """
         if not self.enabled:
             return {"status": "disabled"}
-        return await asyncio.to_thread(
-            self._acknowledge_seen_sync, beijing_now()
-        )
+        return {
+            "status": "acknowledged",
+            "state_changed": False,
+            "message": "通知确认不改变心潮周期。",
+        }
 
     def _restart_silence_timer_sync(self, moment: datetime) -> dict:
         """Deprecated compatibility hook; silence timers no longer exist."""
@@ -3339,6 +3967,19 @@ class XinchaoService:
                 """,
                 (cutoff,),
             ).fetchall()
+            trace_observations = connection.execute(
+                """
+                SELECT canonical_tag, first_seen, last_seen, event_tag,
+                       thought_text, reason, source_tool, source_ref, linkage_json
+                FROM xinchao_thoughts
+                WHERE thought_kind='trace' AND status NOT IN ('retired', 'resolved')
+                  AND first_seen>=?
+                  AND event_tag NOT IN ('', '念痕')
+                  AND source_tool<>'bark_output'
+                ORDER BY last_seen DESC LIMIT 40
+                """,
+                (cutoff,),
+            ).fetchall()
         patterns = []
         tendencies = []
 
@@ -3367,8 +4008,8 @@ class XinchaoService:
             )
             for needles, label in mappings:
                 if any(needle in raw for needle in needles):
-                    return label
-            return raw[:40]
+                    return canonical_tendency(label)
+            return canonical_tendency(raw[:40])
 
         def recency_strength(last_seen: str, evidence: int, severity: float) -> float:
             try:
@@ -3444,20 +4085,66 @@ class XinchaoService:
             ),
             reverse=True,
         )
+        stable_labels = {
+            str(item.get("evidence_label") or "").strip()
+            for item in tendencies
+            if str(item.get("evidence_label") or "").strip()
+        }
+        observations = []
+        observed_labels = set()
+        for row in trace_observations:
+            raw_label = str(row["event_tag"] or "").strip()
+            if not raw_label or raw_label in stable_labels or raw_label in observed_labels:
+                continue
+            label = human_tendency_label(raw_label)
+            if not label:
+                continue
+            observed_labels.add(raw_label)
+            try:
+                effects = json.loads(row["linkage_json"] or "{}")
+            except (TypeError, ValueError, json.JSONDecodeError):
+                effects = {}
+            observations.append(
+                {
+                    "tendency_id": f"observation:thought:{raw_label}",
+                    "kind": "emerging_trace",
+                    "label": label,
+                    "evidence_label": raw_label,
+                    "evidence_count": 1,
+                    "last_seen": str(row["last_seen"] or row["first_seen"] or ""),
+                    "status": "观察中",
+                    "strength": 0.0,
+                    "behavior_rule": "只作为观察记录，不参与行为决定，也不会直接改写性格。",
+                    "evidence": [
+                        {
+                            "id": str(row["canonical_tag"] or ""),
+                            "created_at": str(row["last_seen"] or row["first_seen"] or ""),
+                            "source": "念痕",
+                            "title": raw_label,
+                            "summary": str(row["thought_text"] or ""),
+                            "reason": str(row["reason"] or "目前出现过一次，继续在不同情境中出现后才会进入性格轨迹。"),
+                            "effects": effects,
+                        }
+                    ],
+                }
+            )
+        observations = observations[:8]
         current = tendencies[0] if tendencies else {}
-        evidence = []
-        current_label = str(current.get("evidence_label") or current.get("label") or "")
-        with self._connect() as connection:
+
+        def load_evidence(connection, label: str) -> list[dict]:
+            if not label:
+                return []
             matching_traces = connection.execute(
                 """
                 SELECT canonical_tag, first_seen, last_seen, event_tag,
                        thought_text, reason, source_tool, source_ref, linkage_json
                 FROM xinchao_thoughts
-                WHERE event_tag=? AND first_seen>=? AND source_tool<>'bark_output'
+                WHERE event_tag=? AND first_seen>=? AND status NOT IN ('retired', 'resolved')
+                  AND source_tool<>'bark_output'
                 ORDER BY last_seen DESC LIMIT 12
                 """,
-                (current_label, cutoff),
-            ).fetchall() if current_label else []
+                (label, cutoff),
+            ).fetchall()
             matching_events = connection.execute(
                 """
                 SELECT event_id, created_at, source_tool, source_ref,
@@ -3468,47 +4155,86 @@ class XinchaoService:
                                           'xinchao_status', 'inner_state')
                 ORDER BY created_at DESC, event_id DESC LIMIT 12
                 """,
-                (current_label, cutoff),
-            ).fetchall() if current_label else []
-        for row in matching_traces:
-            item = dict(row)
-            try:
-                effects = json.loads(item.get("linkage_json") or "{}")
-            except (TypeError, ValueError, json.JSONDecodeError):
-                effects = {}
-            evidence.append(
-                {
-                    "id": str(item.get("canonical_tag") or ""),
-                    "created_at": str(item.get("last_seen") or item.get("first_seen") or ""),
-                    "source": "念痕",
-                    "title": str(item.get("event_tag") or "念痕"),
-                    "summary": str(item.get("thought_text") or ""),
-                    "reason": str(item.get("reason") or "这份当下感受反复出现"),
-                    "effects": effects,
-                }
+                (label, cutoff),
+            ).fetchall()
+            items = []
+            for row in matching_traces:
+                item = dict(row)
+                try:
+                    effects = json.loads(item.get("linkage_json") or "{}")
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    effects = {}
+                items.append(
+                    {
+                        "id": str(item.get("canonical_tag") or ""),
+                        "created_at": str(item.get("last_seen") or item.get("first_seen") or ""),
+                        "source": "念痕",
+                        "title": str(item.get("event_tag") or "念痕"),
+                        "summary": str(item.get("thought_text") or ""),
+                        "reason": str(item.get("reason") or "这份当下感受反复出现"),
+                        "effects": effects,
+                    }
+                )
+            for row in matching_events:
+                item = dict(row)
+                try:
+                    effects = json.loads(item.get("deltas_json") or "{}")
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    effects = {}
+                items.append(
+                    {
+                        "id": f"event:{item.get('event_id')}",
+                        "created_at": str(item.get("created_at") or ""),
+                        "source": {
+                            "mailbox": "信箱", "hold": "记忆写入", "grow": "记忆归档",
+                            "thought_trace": "念痕", "thought_trace_update": "念痕修改",
+                        }.get(str(item.get("source_tool") or ""), "一次写入"),
+                        "title": str(item.get("event_tag") or "一次写入"),
+                        "summary": str(item.get("event_summary") or item.get("context_card") or ""),
+                        "reason": "相似处境再次牵动了同一组感受与选择",
+                        "effects": effects,
+                    }
+                )
+            items.sort(key=lambda item: str(item.get("created_at") or ""), reverse=True)
+            return items[:12]
+
+        current_label = str(current.get("evidence_label") or current.get("label") or "")
+        with self._connect() as connection:
+            evidence_by_label = {
+                str(item.get("evidence_label") or ""): load_evidence(
+                    connection, str(item.get("evidence_label") or "")
+                )
+                for item in tendencies[:12]
+                if str(item.get("evidence_label") or "")
+            }
+        evidence = evidence_by_label.get(current_label, [])
+        primary = dict(current)
+        if primary:
+            primary["evidence"] = evidence
+            opposite_labels = set(counter_tendency_labels(primary.get("label", "")))
+            primary["counter_evidence"] = [
+                evidence_item
+                for tendency in tendencies
+                if canonical_tendency(tendency.get("label", "")) in opposite_labels
+                for evidence_item in evidence_by_label.get(
+                    str(tendency.get("evidence_label") or ""), []
+                )
+            ][:8]
+        supporting = []
+        supporting_labels = set()
+        primary_label = str(primary.get("label") or "")
+        for item in tendencies[1:]:
+            item_label = str(item.get("label") or "")
+            if not item_label or item_label == primary_label or item_label in supporting_labels:
+                continue
+            supporting_item = dict(item)
+            supporting_item["evidence"] = evidence_by_label.get(
+                str(item.get("evidence_label") or ""), []
             )
-        for row in matching_events:
-            item = dict(row)
-            try:
-                effects = json.loads(item.get("deltas_json") or "{}")
-            except (TypeError, ValueError, json.JSONDecodeError):
-                effects = {}
-            evidence.append(
-                {
-                    "id": f"event:{item.get('event_id')}",
-                    "created_at": str(item.get("created_at") or ""),
-                    "source": {
-                        "mailbox": "信箱", "hold": "记忆写入", "grow": "记忆归档",
-                        "thought_trace": "念痕", "thought_trace_update": "念痕修改",
-                    }.get(str(item.get("source_tool") or ""), "一次写入"),
-                    "title": str(item.get("event_tag") or "一次写入"),
-                    "summary": str(item.get("event_summary") or item.get("context_card") or ""),
-                    "reason": "相似处境再次牵动了同一组感受与选择",
-                    "effects": effects,
-                }
-            )
-        evidence.sort(key=lambda item: str(item.get("created_at") or ""), reverse=True)
-        evidence = evidence[:12]
+            supporting.append(supporting_item)
+            supporting_labels.add(item_label)
+            if len(supporting) >= 3:
+                break
         formation_reason = ""
         if current:
             formation_reason = (
@@ -3516,6 +4242,16 @@ class XinchaoService:
                 f"反复出现 {int(current.get('evidence_count', 0) or 0)} 次；"
                 "它会在相似情境中轻微影响表达方式和行动时机，但不会改写固定人格。"
             )
+        composite_labels = [
+            str(item.get("label") or "")
+            for item in [current, *supporting]
+            if str(item.get("label") or "")
+        ]
+        composite_summary = (
+            f"目前以“{composite_labels[0]}”为主，同时叠加“{'、'.join(composite_labels[1:])}”。"
+            if len(composite_labels) > 1
+            else (f"目前主要呈现“{composite_labels[0]}”。" if composite_labels else "还没有形成稳定的复合倾向。")
+        )
         return {
             "mode": "behavior_guidance_read_only",
             "days": safe_days,
@@ -3524,6 +4260,15 @@ class XinchaoService:
             "suggestions": patterns,
             "recurring_thoughts": [dict(row) for row in thoughts],
             "tendencies": tendencies[:12],
+            "composite": {
+                "primary": primary,
+                "supporting": supporting,
+                "observing": observations,
+                "summary": composite_summary,
+            },
+            "observing": observations,
+            "tendency_count": len(tendencies),
+            "observation_count": len(observations),
             "tendency": {
                 "name": current.get("label", ""),
                 "label": current.get("label", ""),
@@ -3534,6 +4279,7 @@ class XinchaoService:
                 "description": formation_reason,
             } if current else {},
             "evidence": evidence,
+            "counter_evidence": list(primary.get("counter_evidence") or []),
             "evidence_count": int(current.get("evidence_count", 0) or 0),
             "formation_reason": formation_reason,
             "core_personality_unchanged": True,
@@ -3562,8 +4308,13 @@ class XinchaoService:
             "suggestions": list(report.get("suggestions") or []),
             "recurring_thoughts": list(report.get("recurring_thoughts") or []),
             "tendencies": list(report.get("tendencies") or []),
+            "composite": dict(report.get("composite") or {}),
+            "observing": list(report.get("observing") or []),
+            "tendency_count": int(report.get("tendency_count") or 0),
+            "observation_count": int(report.get("observation_count") or 0),
             "tendency": dict(report.get("tendency") or {}),
             "evidence": list(report.get("evidence") or []),
+            "counter_evidence": list(report.get("counter_evidence") or []),
             "evidence_count": int(report.get("evidence_count") or 0),
             "formation_reason": str(report.get("formation_reason") or ""),
             "core_personality_unchanged": True,
@@ -3606,6 +4357,9 @@ class XinchaoService:
                 "components": [],
             }
         )
+        preview["relationship"] = await asyncio.to_thread(
+            self._relationship_status_sync, preview.get("pipes")
+        )
         preview["rhythm"] = await asyncio.to_thread(
             self._rhythm_sync,
             moment,
@@ -3642,6 +4396,26 @@ class XinchaoService:
             timing["generation_status"] = "cycle_closed"
         preview["timing"] = timing
         return preview
+
+    async def relationship_status(self) -> dict:
+        if not self.enabled:
+            return {"available": False, "disabled": True}
+        preview = await asyncio.to_thread(self._preview_sync, beijing_now())
+        return await asyncio.to_thread(
+            self._relationship_status_sync, preview.get("pipes")
+        )
+
+    async def set_relationship_override(self, value: float, reason: str = "") -> dict:
+        if not self.enabled:
+            return {"available": False, "disabled": True}
+        return await asyncio.to_thread(
+            self._set_relationship_override_sync, value, reason
+        )
+
+    async def restore_relationship_auto(self) -> dict:
+        if not self.enabled:
+            return {"available": False, "disabled": True}
+        return await asyncio.to_thread(self._restore_relationship_auto_sync)
 
     def _list_private_thoughts_sync(
         self, status: str = "active", limit: int = 100, kind: str = "all"
@@ -3906,6 +4680,19 @@ class XinchaoService:
         else:
             preview["darkflow"] = ""
             preview["darkflow_item"] = None
+        preview["composite_states"] = infer_composite_states(preview.get("pipes"))
+        preview["expression_state"] = (
+            preview["composite_states"][0]
+            if preview["composite_states"]
+            else {
+                "name": preview.get("dominant", "平稳"),
+                "score": round(float(preview.get("dominant_value", 0.0)), 4),
+                "components": [],
+            }
+        )
+        preview["relationship"] = await asyncio.to_thread(
+            self._relationship_status_sync, preview.get("pipes")
+        )
         return preview
 
     @staticmethod

@@ -62,7 +62,7 @@
   const rButton = (label, action, id='') => `<button class="r-button" type="button" data-r-action="${action}"${id ? ` data-r-id="${esc(id)}"` : ''}>${esc(label)}</button>`;
   const rRecord = (item, target, editable=true) => {
     const id = item.id ?? item.message_id ?? item.task_id ?? item.entry_id ?? item.fact_key ?? item.candidate_id ?? '';
-    const statusName={open:'进行中',completed:'已完成',cancelled:'已取消',pending:'等待中',sent:'已发送',delivered:'已交付'}[item.status]||item.status;
+    const statusName={planned:'准备做',in_progress:'正在做',waiting:'等待中',completed:'已完成',pending:'等待中',sent:'已发送',delivered:'已交付'}[item.status]||item.status;
     const meta = [rTime(item), item.type_label, statusName, item.source].filter(Boolean).join(' · ');
     return `<article class="r-record" data-r-record="${esc(id)}"><div class="r-record-mark"></div><div><small>${esc(meta)}</small><h3>${esc(rTitle(item))}</h3><p>${esc(rText(item))}</p></div><div class="r-record-actions">${editable ? rButton('修改','edit',id) : ''}${editable ? rButton('历史','history',id) : ''}</div></article>`;
   };
@@ -120,7 +120,10 @@
     return path.map((p,i)=>`${i?'L':'M'}${p[0].toFixed(1)} ${p[1].toFixed(1)}`).join(' ');
   }
   async function rRenderHome(){
-    const data=await rApi('/api/home',homeFallback()); R.home=data;
+    const [data,pending]=await Promise.all([
+      rApi('/api/home',homeFallback()),
+      rApi('/api/behavior/pending',{available:false,count:0},{refresh:true})
+    ]); R.home=data;
     data.as_of=rDateTime(data.as_of);
     const [name,value]=dominant(data.state); const wanted=data.most_wanted||{}; const voice=rText(wanted.item)||'此刻没有必须说出口的话。';
     const tendency=data.disposition?.tendency || data.disposition?.current || {name:'仍在形成',score:0,delta:0};
@@ -128,6 +131,15 @@
     const path=homeWave(data.transitions||[]);
     const wantedTarget=wanted.source==='darkflow'?'darkflow':wanted.source==='thought'?'mind':'thoughts';
     rPage('core',`<div class="page r-page r-home"><header class="r-home-title"><time>${esc(data.as_of||'')}</time><h1>此刻，<em>正在发生。</em></h1><p>${esc(data.house_phrase?.text||'')}</p></header><section class="r-home-current"><article class="r-home-mood"><span>此时的状态与情绪走向</span><h2>${esc(mood)}</h2><div class="r-dominant"><b>${esc(name)}</b><strong>${rNum(value).toFixed(2)}</strong></div><svg viewBox="0 0 560 130" preserveAspectRatio="none" aria-label="最近情绪走向"><path d="${path}"/><circle cx="552" cy="${(path.match(/([\d.]+)$/)||['','65'])[1]}" r="5"/></svg><button data-map-target="hormones" type="button">查看全部状态 ↗</button></article><article class="r-home-tendency"><span>本月性格轨迹</span><h2>${esc(tendency.name||tendency.label||'仍在形成')}</h2><strong>${rNum(tendency.score??tendency.strength).toFixed(2)} <i>${rNum(tendency.delta)>=0?'+':''}${rNum(tendency.delta).toFixed(2)}</i></strong><small>${rNum(data.disposition?.evidence_count||data.disposition?.sample_count)} 条反复证据</small><button data-map-target="personality" type="button">查看形成过程 ↗</button></article></section><section class="r-home-voice"><div><span>现在最想说的话</span><strong>${esc(wanted.display_name||'')}</strong></div><blockquote>“${esc(voice)}”</blockquote><small>${esc(rTime(wanted.item))}</small><button data-map-target="${wantedTarget}" type="button">打开来源 ↗</button></section></div>`);
+    // Always clear a stale overlay first. After acknowledgement the API can
+    // correctly return an empty pending set, so cleanup cannot live only in
+    // the branch that renders a new overlay.
+    document.querySelector('#rPushOverlay')?.remove();
+    const hasPendingPush=Boolean(pending.available&&!pending.acknowledged&&rNum(pending.count)>0);
+    if(hasPendingPush){
+      document.body.insertAdjacentHTML('beforeend',`<aside class="r-push-overlay" id="rPushOverlay" role="dialog" aria-modal="true" aria-label="新的推送"><div><span>有新的推送</span><strong>${rNum(pending.count)} 条内容在等你看见</strong><p>确认后，这一批不会再重复出现。</p><button class="r-primary" id="rAcknowledgeHomePush" type="button">我看到了</button></div></aside>`);
+      document.querySelector('#rAcknowledgeHomePush')?.addEventListener('click',async(event)=>{const button=event.currentTarget;button.disabled=true;document.querySelector('#rPushOverlay')?.remove();try{await liveApi('/api/behavior/acknowledge',{method:'POST',body:'{}'});rInvalidate();liveNotice('已经记下你看到了。');rRenderHome();}catch(error){liveNotice(error.message,true)}});
+    }
     rWarmRoutes();
   }
 
@@ -175,8 +187,15 @@
 
   function dispositionFallback(){return {days:30,tendency:{name:'更愿意靠近',score:.54,delta:.08},evidence:[{created_at:'2026-08-21 20:58',source:'信箱',title:'讨论了记忆与身份',summary:'相似情境里更主动地把话继续下去。',effects:{关系网:.06,情绪:.04}},{created_at:'2026-08-23 04:10',source:'念痕',title:'留下了一句私密想法',summary:'反复出现的靠近倾向被继续保留。',effects:{想靠近:.08}}]};}
   async function rRenderPersonality(){
-    const data=await rApi('/api/disposition?days=30',dispositionFallback());const t=data.tendency||data.current||data.strongest||{};const evidence=data.evidence||data.items||data.formation_path||[];
-    rPage('personality',`<div class="page r-page r-personality"><header class="r-title"><h1>性格轨迹</h1></header><section class="r-disposition-current"><div><span>近 ${rNum(data.days||30)} 天形成的倾向</span><h2>${esc(t.name||t.label||'仍在形成')}</h2><p>${esc(data.formation_reason||t.summary||t.description||'')}</p></div><strong>${rNum(t.score??t.strength).toFixed(2)}<small>${rNum(data.evidence_count||evidence.length)} 条证据</small></strong></section><section class="r-formation"><h2>形成它的具体证据</h2>${evidence.length?evidence.map(item=>`<article><time>${esc(rTime(item))}</time><i></i><div><small>${esc(item.source||item.source_tool||'一次经历')}</small><h3>${esc(rTitle(item))}</h3><p>${esc(item.reason||rText(item)||item.summary||'')}</p><span>${esc(Object.entries(item.effects||item.deltas||{}).map(([n,v])=>`${n} ${rNum(v)>=0?'+':''}${rNum(v).toFixed(2)}`).join(' · '))}</span></div></article>`).join(''):rEmpty('这个月还没有形成稳定倾向')}</section></div>`);
+    const data=await rApi('/api/disposition?days=30',dispositionFallback());
+    const composite=data.composite||{};const t=composite.primary||data.tendency||data.current||data.strongest||{};
+    const evidence=t.evidence||data.evidence||data.items||data.formation_path||[];
+    const supporting=composite.supporting||((data.tendencies||[]).slice(1,4));
+    const observing=composite.observing||data.observing||[];
+    const effects=item=>esc(Object.entries(item.effects||item.deltas||{}).map(([n,v])=>`${n} ${rNum(v)>=0?'+':''}${rNum(v).toFixed(2)}`).join(' · '));
+    const evidenceList=items=>items?.length?items.map(item=>`<article><time>${esc(rTime(item))}</time><i></i><div><small>${esc(item.source||item.source_tool||'一次经历')}</small><h3>${esc(rTitle(item))}</h3><p>${esc(item.reason||rText(item)||item.summary||'')}</p><span>${effects(item)}</span></div></article>`).join(''):rEmpty('还没有足够的重复证据');
+    const traitCard=item=>`<article class="r-trait-card"><header><div><small>${esc(item.kind==='emerging_trace'?'观察中':'共同形成')}</small><h3>${esc(item.label||item.name||'未命名倾向')}</h3></div><strong>${rNum(item.strength).toFixed(2)}<small>${rNum(item.evidence_count)} 条证据</small></strong></header><p>${esc(item.behavior_rule||'只在相似情境下作为软倾向参考。')}</p><time>最近出现：${esc(rTime({created_at:item.last_seen}))}</time>${item.evidence?.length?`<details><summary>查看这项倾向的证据</summary><div class="r-trait-evidence">${evidenceList(item.evidence)}</div></details>`:''}</article>`;
+    rPage('personality',`<div class="page r-page r-personality"><header class="r-title"><h1>性格轨迹</h1></header><section class="r-disposition-current"><div><span>近 ${rNum(data.days||30)} 天形成的主倾向</span><h2>${esc(t.name||t.label||'仍在形成')}</h2><p>${esc(data.formation_reason||t.summary||t.description||'')}</p></div><strong>${rNum(t.score??t.strength).toFixed(2)}<small>${rNum(t.evidence_count||data.evidence_count||evidence.length)} 条证据</small></strong></section><section class="r-composite-summary"><span>复合性格画像</span><p>${esc(composite.summary||'性格不是单一标签，而是多种反复倾向共同形成。')}</p></section>${supporting.length?`<section class="r-trait-section"><h2>同时存在的倾向</h2><div class="r-trait-grid">${supporting.map(traitCard).join('')}</div></section>`:''}${observing.length?`<section class="r-trait-section r-observing-section"><h2>正在观察中的新倾向 <small>${observing.length} 项</small></h2><p class="r-trait-note">这些内容已经记录，但还没有达到长期性格证据的门槛。</p><div class="r-trait-grid">${observing.map(traitCard).join('')}</div></section>`:''}<section class="r-formation"><h2>主倾向的具体证据</h2>${evidenceList(evidence)}</section></div>`);
   }
 
   const axisMeta={X:['时间','何时发生、先后与持续'],Y:['关系','人与主题怎样靠近或疏远'],Z:['事实','事情如何被更新与确认'],E:['情绪','感受怎样牵动内在波动'],M:['沉淀','内容怎样留下、活跃或回落']};
@@ -246,7 +265,7 @@
     {id:'search',name:'智能搜索'},{id:'timeline',name:'事实时间线'},
     {id:'tasks',name:'未竟'},{id:'treasury',name:'AI 小金库'},{id:'mailbox',name:'信箱'},
     {id:'darkflow',name:'暗涌'},{id:'thoughts',name:'念痕'},{id:'mind',name:'心念'},
-    {id:'resonance',name:'共振与张力'},{id:'behavior',name:'行为与推送'},
+    {id:'resonance',name:'内在牵引'},{id:'behavior',name:'行为与推送'},
     {id:'personality',name:'性格轨迹'},{id:'coordinates',name:'心智经纬'},{id:'settings',name:'设置与安全'}
   ]};
   let rWarmed=false;
@@ -296,12 +315,12 @@
   }
   async function rRenderTasks(){
     const data=await rApi(endpointFor.tasks,{items:[],counts:{}});const items=data.items||[];const counts=data.counts||{};
-    const statusName={open:'进行中',completed:'已完成',cancelled:'已取消'};
-    rPage('tasks',`<div class="page r-page r-module r-module-tasks"><header class="r-title"><h1>未竟</h1><button class="r-primary" data-r-add="tasks" type="button">＋ 新增未竟</button></header><div class="r-task-counts"><span>进行中 ${rNum(counts.open)}</span><span>已完成 ${rNum(counts.completed)}</span><span>已取消 ${rNum(counts.cancelled)}</span></div><section class="r-task-list">${items.length?items.map(item=>`<article class="r-task-item is-${esc(item.status||'open')}"><header><span>${esc(statusName[item.status]||item.status||'进行中')}</span><time>${esc(rTime(item))}</time></header><h2>${esc(rTitle(item))}</h2><p>${esc(rText(item))}</p><small>重要度 ${rNum(item.importance||3)} / 5</small><footer><button class="r-button" data-r-action="edit" data-r-id="${esc(item.task_id)}" type="button">修改</button><button class="r-button" data-r-action="history" data-r-id="${esc(item.task_id)}" type="button">历史</button>${item.status==='open'?`<button data-r-task-status="completed" data-r-id="${esc(item.task_id)}" type="button">完成</button><button class="r-button" data-r-task-status="cancelled" data-r-id="${esc(item.task_id)}" type="button">取消</button>`:`<button data-r-task-status="open" data-r-id="${esc(item.task_id)}" type="button">重新开始</button>`}<button class="r-button danger" data-r-task-delete="${esc(item.task_id)}" type="button">删除</button></footer></article>`).join(''):rEmpty('没有需要继续的事情')}</section></div>`);
+    const statusName={planned:'准备做',in_progress:'正在做',waiting:'等待中',completed:'已完成'};
+    rPage('tasks',`<div class="page r-page r-module r-module-tasks"><header class="r-title"><div><h1>未竟</h1><p>由你和当前 AI 主动维护</p></div><button class="r-primary" data-r-add="tasks" type="button">＋ 新增未竟</button></header><div class="r-task-counts"><span>准备做 ${rNum(counts.planned)}</span><span>正在做 ${rNum(counts.in_progress)}</span><span>等待中 ${rNum(counts.waiting)}</span><span>已完成 ${rNum(counts.completed)}</span></div><section class="r-task-list">${items.length?items.map(item=>`<article class="r-task-item is-${esc(item.status||'planned')}"><header><span>${esc(statusName[item.status]||item.status||'准备做')}</span><time>${esc(rTime(item))}</time></header><h2>${esc(rTitle(item))}</h2><p>${esc(rText(item))}</p><small>重要度 ${rNum(item.importance||3)} / 5</small><footer><button class="r-button" data-r-action="edit" data-r-id="${esc(item.task_id)}" type="button">修改</button><button class="r-button" data-r-action="history" data-r-id="${esc(item.task_id)}" type="button">历史</button>${item.status!=='completed'?`<button data-r-task-status="planned" data-r-id="${esc(item.task_id)}" type="button">准备</button><button data-r-task-status="in_progress" data-r-id="${esc(item.task_id)}" type="button">开始</button><button data-r-task-status="waiting" data-r-id="${esc(item.task_id)}" type="button">等待</button><button data-r-task-status="completed" data-r-id="${esc(item.task_id)}" type="button">完成</button>`:`<button data-r-task-status="planned" data-r-id="${esc(item.task_id)}" type="button">重新安排</button>`}<button class="r-button danger" data-r-task-delete="${esc(item.task_id)}" type="button">删除</button></footer></article>`).join(''):rEmpty('没有需要继续的事情')}</section></div>`);
     document.querySelector('[data-r-add="tasks"]')?.addEventListener('click',()=>rAdd('tasks'));
     document.querySelectorAll('[data-r-action="edit"]').forEach(btn=>btn.addEventListener('click',()=>rEdit('tasks',btn.dataset.rId,items)));
     document.querySelectorAll('[data-r-action="history"]').forEach(btn=>btn.addEventListener('click',()=>rHistory('tasks',btn.dataset.rId)));
-    document.querySelectorAll('[data-r-task-status]').forEach(btn=>btn.addEventListener('click',async()=>{try{await liveApi(`/api/tasks/${btn.dataset.rId}`,{method:'PUT',body:JSON.stringify({status:btn.dataset.rTaskStatus})});rInvalidate();liveNotice(btn.dataset.rTaskStatus==='completed'?'这件事已经完成。':btn.dataset.rTaskStatus==='cancelled'?'这件事已取消。':'这件事重新回到未竟。');rRenderTasks();}catch(error){liveNotice(error.message,true)}}));
+    document.querySelectorAll('[data-r-task-status]').forEach(btn=>btn.addEventListener('click',async()=>{try{await liveApi(`/api/tasks/${btn.dataset.rId}`,{method:'PUT',body:JSON.stringify({status:btn.dataset.rTaskStatus})});rInvalidate();liveNotice(`状态已改为：${statusName[btn.dataset.rTaskStatus]||btn.dataset.rTaskStatus}`);rRenderTasks();}catch(error){liveNotice(error.message,true)}}));
     document.querySelectorAll('[data-r-task-delete]').forEach(btn=>btn.addEventListener('click',async()=>{if(!confirm('彻底删除这条未竟？历史仍保留在备份中。'))return;try{await liveApi(`/api/tasks/${btn.dataset.rTaskDelete}`,{method:'DELETE',body:JSON.stringify({confirm_task_id:Number(btn.dataset.rTaskDelete)})});rInvalidate();liveNotice('这条未竟已经删除。');rRenderTasks();}catch(error){liveNotice(error.message,true)}}));
   }
   async function rRenderTreasury(){
@@ -322,7 +341,7 @@
     const data=await rApi(endpointFor.resonance,{items:[],strongest:{},counterweight:{},balance:0});
     const pull=data.strongest||data.tension?.strongest||{};const hold=data.counterweight||data.tension?.counterweight||{};const balance=rNum(data.balance??data.tension?.balance);
     const links=data.items||[];
-    rPage('resonance',`<div class="page r-page r-resonance"><header class="r-title"><h1>共振与张力</h1></header><section class="r-resonance-field"><article class="r-resonance-pull"><span>正在靠近</span><h2>${esc(pull.name||'平静')}</h2><strong>${rNum(pull.value).toFixed(2)}</strong></article><div class="r-resonance-knot" style="--balance:${Math.max(-1,Math.min(1,balance))}"><i></i><i></i><i></i><b></b></div><article class="r-resonance-hold"><span>正在牵制</span><h2>${esc(hold.name||'平衡')}</h2><strong>${rNum(hold.value).toFixed(2)}</strong></article></section><section class="r-resonance-memory"><header><span>此刻被什么牵动</span><strong>张力 ${balance>=0?'+':''}${balance.toFixed(2)}</strong></header>${links.length?links.map(item=>`<article><i></i><div><h3>${esc(rTitle(item))}</h3><p>${esc(rText(item)||item.why||'')}</p><small>${esc(item.why||'')}</small></div><strong>${rNum(item.score).toFixed(2)}</strong></article>`).join(''):rEmpty('还没有形成明显共振')}</section></div>`);
+    rPage('resonance',`<div class="page r-page r-resonance"><header class="r-title"><h1>内在牵引</h1></header><section class="r-resonance-field"><article class="r-resonance-pull"><span>此刻的牵引</span><h2>${esc(pull.name||'平静')}</h2><strong>${rNum(pull.value).toFixed(2)}</strong></article><div class="r-resonance-knot" style="--balance:${Math.max(-1,Math.min(1,balance))}"><i></i><i></i><i></i><b></b></div><article class="r-resonance-hold"><span>正在平衡</span><h2>${esc(hold.name||'平衡')}</h2><strong>${rNum(hold.value).toFixed(2)}</strong></article></section><section class="r-resonance-memory"><header><span>这次写入唤起了什么</span><strong>记忆回响</strong></header>${links.length?links.map(item=>`<article><i></i><div><h3>${esc(item.source_name||item.name||'一次记忆回响')}</h3><p>${esc(item.trigger||item.excerpt||item.why||'')}</p><small>${esc(item.why||'')}</small></div><strong>${rNum(item.score).toFixed(2)}</strong></article>`).join(''):rEmpty('这一次还没有唤起明显的记忆回响')}</section></div>`);
   }
   async function rRenderToolbox(){
     const data=await rApi(endpointFor.toolbox,toolboxFallback);const items=data.items?.length?data.items:toolboxFallback.items;
@@ -355,7 +374,7 @@
     const item=items.find(x=>String(x.id??x.message_id??x.task_id??x.entry_id??x.fact_key??x.candidate_id)===String(id));if(!item)return;
     try{
       if(target==='mailbox'){const message=prompt('修改信箱内容',rText(item));if(!message)return;await liveApi(`/api/mailbox/messages/${id}`,{method:'PUT',body:JSON.stringify({message})});}
-      if(target==='tasks'){const title=prompt('未竟名称',rTitle(item));if(!title)return;const details=prompt('具体内容',rText(item))||'';await liveApi(`/api/tasks/${id}`,{method:'PUT',body:JSON.stringify({title,details,importance:rNum(item.importance||3),status:item.status||'open'})});}
+      if(target==='tasks'){const title=prompt('未竟名称',rTitle(item));if(!title)return;const details=prompt('具体内容',rText(item))||'';await liveApi(`/api/tasks/${id}`,{method:'PUT',body:JSON.stringify({title,details,importance:rNum(item.importance||3),status:item.status||'planned'})});}
       if(target==='treasury'){const reason=prompt('说明',item.reason||'');const amount=prompt('金额',item.amount||'');if(!reason||!amount)return;await liveApi(`/api/treasury/entries/${id}`,{method:'PUT',body:JSON.stringify({reason,amount,entry_type:item.entry_type||'income',occurred_at:item.occurred_at||''})});}
       if(target==='timeline'){const value=prompt('当前事实',rText(item));if(!value)return;await liveApi('/api/timeline',{method:'POST',body:JSON.stringify({fact:rTitle(item),value,effective_date:new Date().toISOString().slice(0,10),source_excerpt:'管理页面更正'})});}
       liveNotice('修改已保存，并保留历史。');rRenderModule(target);
@@ -382,6 +401,7 @@
   window.renderSearch=rRenderSearch;
   window.renderModule=target=>target==='timeline'?rRenderTimeline():rRenderModule(target);
   window.renderDetail=target=>target==='personality'?rRenderPersonality():rRenderCoordinates();
+  window.addEventListener('clio:authenticated',()=>{if(window.matchMedia('(max-width:900px)').matches)return;rRenderHome().catch(error=>liveNotice(error.message,true));});
   window.navigateMap=target=>{
     let render=null;
     if(target==='core')render=()=>rRenderHome();

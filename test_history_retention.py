@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock
 
 from history_retention import HistoryRetentionEngine
 from history_store import HistoryStore
+from sqlite_utils import ClosingConnection
 
 
 class FakeBucketManager:
@@ -37,7 +38,9 @@ class HistoryRetentionTests(unittest.IsolatedAsyncioTestCase):
         operation_type: str = "content_replace",
         metadata: dict | None = None,
     ) -> int:
-        with sqlite3.connect(self.store.db_path) as connection:
+        with sqlite3.connect(
+            self.store.db_path, factory=ClosingConnection
+        ) as connection:
             cursor = connection.execute(
                 """
                 INSERT INTO bucket_history (

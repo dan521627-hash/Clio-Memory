@@ -1,4 +1,5 @@
 import os
+import sqlite3
 import tempfile
 import unittest
 from datetime import datetime, timedelta
@@ -6,6 +7,7 @@ from unittest.mock import AsyncMock, patch
 
 from behavior_service import BehaviorService
 from utils import beijing_now
+from xinchao_engine import PIPE_NAMES
 
 
 class FakeBehaviorEvaluator:
@@ -85,7 +87,7 @@ class StubbornThirdPersonEvaluator(FakeBehaviorEvaluator):
         return {"action_type": "message", "content": "她还没回来，他还在等她。"}
 
 
-def config(root, mode="rehearsal"):
+def config(root, mode="rehearsal", follow_up_delay_minutes=60):
     return {
         "buckets_dir": root,
         "behavior": {
@@ -93,6 +95,7 @@ def config(root, mode="rehearsal"):
             "enabled": True,
             "mode": mode,
             "max_chars": 80,
+            "follow_up_delay_minutes": follow_up_delay_minutes,
             # Keep general behavior tests independent from the wall clock.
             # The dedicated quiet-hours test overrides these values explicitly.
             "quiet_start": "00:00",
@@ -102,12 +105,121 @@ def config(root, mode="rehearsal"):
 
 
 class BehaviorServiceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_silence_push_repeats_after_interval_and_carries_seen_state(self):
+        with tempfile.TemporaryDirectory() as root:
+            evaluator = RegeneratingBehaviorEvaluator()
+            service = BehaviorService(
+                config(root, mode="live", follow_up_delay_minutes=60), evaluator
+            )
+            service.device_key = "test-device-key"
+            service._send_messages = AsyncMock()
+            state = {
+                "cycle_id": 91,
+                "interaction_phase": "absence",
+                "silence_eligible": True,
+                "pipes": {"想靠近": 0.8},
+                "event_contexts": [{"context_card": "今天发生了一件需要消化的事。"}],
+                "absence_started_at": beijing_now().isoformat(timespec="seconds"),
+            }
+
+            first = await service.process_silence_nudge(state)
+            first_result = await service.process_due(state, None, None)
+            first_action = first_result[0]["item"]
+            immediate = await service.process_silence_nudge(state)
+            self.assertEqual(first["status"], "pending")
+            self.assertEqual(first_result[0]["status"], "sent")
+            self.assertEqual(immediate["status"], "waiting")
+
+            old = (beijing_now() - timedelta(hours=2)).isoformat(timespec="seconds")
+            connection = sqlite3.connect(service.store.db_path)
+            try:
+                connection.execute(
+                    "UPDATE behavior_candidates SET updated_at=? WHERE cycle_id=?",
+                    (old, 91),
+                )
+                connection.execute(
+                    "UPDATE behavior_actions SET decided_at=?, delivered_at=? "
+                    "WHERE action_id=?",
+                    (old, old, first_action["action_id"]),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+            await service.store.acknowledge_pending(first_action["action_id"])
+
+            second = await service.process_silence_nudge(state)
+            second_result = await service.process_due(state, None, None)
+
+        self.assertEqual(second["status"], "pending")
+        self.assertNotEqual(
+            second["item"]["source_event_id"], first["item"]["source_event_id"]
+        )
+        self.assertEqual(second_result[0]["status"], "sent")
+        self.assertEqual(evaluator.calls[-1]["push_sequence"], 2)
+        self.assertTrue(evaluator.calls[-1]["last_push_acknowledged"])
+        self.assertTrue(evaluator.calls[-1]["push_history"][0]["acknowledged"])
+
+    async def test_due_push_recalls_history_when_darkflow_is_not_ready(self):
+        with tempfile.TemporaryDirectory() as root:
+            evaluator = FakeBehaviorEvaluator()
+            service = BehaviorService(config(root), evaluator)
+            recalled = [{
+                "source": "mailbox",
+                "message_id": 9,
+                "excerpt": "之前也有一次先冷淡后和好的晚上。",
+                "relevance": 0.91,
+            }]
+
+            async def provider(state, event_contexts):
+                self.assertEqual(event_contexts[-1]["context_card"], "今天又发生了争执。")
+                return recalled
+
+            service.set_memory_resonance_provider(provider)
+            now = beijing_now()
+            await service.store.upsert_candidate(
+                {
+                    "cycle_id": 81,
+                    "source_event_id": 81,
+                    "created_at": now.isoformat(timespec="seconds"),
+                    "due_at": (now - timedelta(minutes=1)).isoformat(timespec="seconds"),
+                    "expires_at": (now + timedelta(hours=1)).isoformat(timespec="seconds"),
+                    "status": "pending",
+                    "event_contexts": [{"context_card": "今天又发生了争执。"}],
+                    "decision_context": {"phase": "silence_entry"},
+                }
+            )
+            result = await service.process_due(
+                {
+                    "cycle_id": 81,
+                    "interaction_phase": "absence",
+                    "silence_eligible": True,
+                    "pipes": {"想靠近": 0.5},
+                    "event_contexts": [{"context_card": "今天又发生了争执。"}],
+                },
+                None,
+                None,
+            )
+
+        self.assertEqual(result[0]["status"], "rehearsal")
+        self.assertEqual(evaluator.calls[0]["memory_resonance"], recalled)
+
+    async def test_every_pipe_can_be_selected_as_an_expression_driver(self):
+        """No pipe may be display-only before the DeepSeek behavior decision."""
+        with tempfile.TemporaryDirectory() as root:
+            service = BehaviorService(config(root), FakeBehaviorEvaluator())
+            for pipe in PIPE_NAMES:
+                intent = service._expression_intent(
+                    {"pipes": {pipe: 0.8}}, [], recent_intents=[]
+                )
+                self.assertIn(pipe, intent["source_pipes"], pipe)
+
     async def test_silence_entry_waits_until_absence_and_is_idempotent(self):
         with tempfile.TemporaryDirectory() as root:
             service = BehaviorService(config(root), FakeBehaviorEvaluator())
             active = {
                 "cycle_id": 88,
                 "interaction_phase": "active",
+                "silence_eligible": True,
                 "pipes": {f"状态{i}": i / 100 for i in range(48)},
             }
             waiting = await service.process_silence_nudge(active)
@@ -116,7 +228,7 @@ class BehaviorServiceTests(unittest.IsolatedAsyncioTestCase):
                 **active,
                 "interaction_phase": "absence",
                 "absence_started_at": beijing_now().isoformat(timespec="seconds"),
-                "event_contexts": [{"context_card": "一条新的交接信已经写入。"}],
+                "event_contexts": [{"context_card": "她写下了一封新的交接信。"}],
             }
             first = await service.process_silence_nudge(absence)
             second = await service.process_silence_nudge(absence)
@@ -130,7 +242,7 @@ class BehaviorServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(after[0]["decision_context"]["pipe_count"], 48)
         self.assertEqual(
             after[0]["decision_context"]["trigger_summary"],
-            "一条新的交接信已经写入。",
+            "她写下了一封新的交接信。",
         )
 
     async def test_silence_entry_decision_receives_all_48_pipes(self):
@@ -141,6 +253,7 @@ class BehaviorServiceTests(unittest.IsolatedAsyncioTestCase):
             state = {
                 "cycle_id": 89,
                 "interaction_phase": "absence",
+                "silence_eligible": True,
                 "absence_started_at": beijing_now().isoformat(timespec="seconds"),
                 "elapsed_seconds": 0,
                 "sleep_stage": "awake_waiting",
@@ -354,7 +467,7 @@ class BehaviorServiceTests(unittest.IsolatedAsyncioTestCase):
             evaluator = SkippingBehaviorEvaluator()
             service = BehaviorService(config(root), evaluator)
             contexts = [
-                {"context_card": "示例用户说她要出去了，刚准备出门，到了会再说。"}
+                {"context_card": "菜菜说她要出去了，刚准备出门，到了会再说。"}
             ]
             event = {
                 "status": "applied",
@@ -364,6 +477,9 @@ class BehaviorServiceTests(unittest.IsolatedAsyncioTestCase):
             }
             state = {
                 "cycle_id": 20,
+                "interaction_phase": "absence",
+                "silence_eligible": True,
+                "absence_started_at": beijing_now().isoformat(timespec="seconds"),
                 "pipes": {
                     "想知道她在干嘛": 0.72,
                     "责任": 0.35,
@@ -375,7 +491,7 @@ class BehaviorServiceTests(unittest.IsolatedAsyncioTestCase):
                 "sleep_stage": "awake_waiting",
                 "event_contexts": contexts,
             }
-            scheduled = await service.schedule_event(event, state)
+            scheduled = await service.process_silence_nudge(state)
             candidate = scheduled["item"]
             await service.store.update_candidate(
                 candidate["candidate_id"],
@@ -418,11 +534,13 @@ class BehaviorServiceTests(unittest.IsolatedAsyncioTestCase):
                     "hormone_name": "想靠近",
                     "hormone_drive": 0.8,
                     "decision_note": "情绪驱动较高，保留一次到点复核：想靠近=0.80",
+                    "decision_context": {"phase": "silence_entry"},
                 }
             )
             state = {
                 "cycle_id": 22,
-                "interaction_phase": "active",
+                "interaction_phase": "absence",
+                "silence_eligible": True,
                 "elapsed_seconds": 3600,
                 "pipes": {"想靠近": 0.8},
                 "event_contexts": [{"context_card": "事情还没有结束。"}],
@@ -447,7 +565,26 @@ class BehaviorServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(evaluator.calls), 2)
         self.assertTrue(evaluator.calls[1]["retry_instruction"])
 
-    async def test_sent_plaintext_is_handed_off_once_then_hard_deleted(self):
+    async def test_activity_keeps_delivered_push_until_seen(self):
+        with tempfile.TemporaryDirectory() as root:
+            service = BehaviorService(config(root), FakeBehaviorEvaluator())
+            item = await service.store.record(
+                {
+                    "cycle_id": 69,
+                    "stage_index": 1,
+                    "content": "这条推送还在等用户确认。",
+                    "status": "sent",
+                    "delivered_at": beijing_now().isoformat(timespec="seconds"),
+                }
+            )
+            cancelled = await service.store.cancel_for_activity(69)
+            pending = await service.store.pending_handoff_summary()
+
+        self.assertEqual(cancelled["pending_handoffs"], 0)
+        self.assertTrue(pending["available"])
+        self.assertEqual(pending["latest"]["action_id"], item["action_id"])
+
+    async def test_sent_plaintext_is_handed_off_once_then_deleted(self):
         with tempfile.TemporaryDirectory() as root:
             service = BehaviorService(config(root), FakeBehaviorEvaluator())
             item = await service.store.record(
@@ -532,7 +669,7 @@ class BehaviorServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(next_push["available"])
         self.assertEqual(next_push["latest"]["action_id"], second["action_id"])
 
-    async def test_handoff_purge_also_removes_related_candidate_material(self):
+    async def test_handoff_delete_also_removes_related_candidate_material(self):
         with tempfile.TemporaryDirectory() as root:
             service = BehaviorService(config(root), FakeBehaviorEvaluator())
             candidate = await service.store.upsert_candidate(
@@ -569,7 +706,7 @@ class BehaviorServiceTests(unittest.IsolatedAsyncioTestCase):
                 "status": "applied",
                 "event_id": 42,
                 "cycle_id": 20,
-                "context_card": "示例用户已经到家了，事情结束了。",
+                "context_card": "菜菜已经到家了，事情结束了。",
             }
             state = {
                 "cycle_id": 20,
@@ -578,8 +715,8 @@ class BehaviorServiceTests(unittest.IsolatedAsyncioTestCase):
             }
             scheduled = await service.schedule_event(event, state)
 
-        self.assertEqual(scheduled["status"], "skipped")
-        self.assertEqual(scheduled["item"]["follow_up_required"], 0)
+        self.assertEqual(scheduled["status"], "deferred")
+        self.assertNotIn("item", scheduled)
 
     async def test_high_emotion_event_gets_one_recheck_after_conservative_schedule_skip(self):
         with tempfile.TemporaryDirectory() as root:
@@ -598,9 +735,8 @@ class BehaviorServiceTests(unittest.IsolatedAsyncioTestCase):
             }
             scheduled = await service.schedule_event(event, state)
 
-        self.assertEqual(scheduled["status"], "pending")
-        self.assertEqual(scheduled["item"]["follow_up_required"], 0)
-        self.assertIn("保留一次到点复核", scheduled["item"]["decision_note"])
+        self.assertEqual(scheduled["status"], "deferred")
+        self.assertNotIn("item", scheduled)
 
     async def test_event_candidate_is_scheduled_then_decided_without_darkflow(self):
         with tempfile.TemporaryDirectory() as root:
@@ -614,6 +750,9 @@ class BehaviorServiceTests(unittest.IsolatedAsyncioTestCase):
             }
             state = {
                 "cycle_id": 3,
+                "interaction_phase": "absence",
+                "silence_eligible": True,
+                "absence_started_at": beijing_now().isoformat(timespec="seconds"),
                 "pipes": {"想知道她在干嘛": 0.6},
                 "dominant": "想知道她在干嘛",
                 "dominant_value": 0.6,
@@ -621,7 +760,7 @@ class BehaviorServiceTests(unittest.IsolatedAsyncioTestCase):
                 "sleep_stage": "awake_waiting",
                 "event_contexts": [{"context_card": "她出远门，正在路上。"}],
             }
-            scheduled = await service.schedule_event(event, state)
+            scheduled = await service.process_silence_nudge(state)
             candidate = scheduled["item"]
             await service.store.update_candidate(
                 candidate["candidate_id"],
@@ -635,7 +774,9 @@ class BehaviorServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(scheduled["status"], "pending")
         self.assertEqual(results[0]["status"], "rehearsal")
         self.assertEqual(len(actions), 1)
-        self.assertEqual(len(evaluator.schedule_calls), 1)
+        # The old two-step scheduler is intentionally bypassed.  DeepSeek makes
+        # the one real push decision only after the mailbox-gated silence entry.
+        self.assertEqual(len(evaluator.schedule_calls), 0)
         self.assertEqual(len(evaluator.calls), 1)
         self.assertEqual(evaluator.calls[0]["darkflow"], "")
 

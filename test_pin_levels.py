@@ -185,7 +185,7 @@ class PinLevelTests(unittest.IsolatedAsyncioTestCase):
         ):
             result = await server.pulse_boot()
 
-        self.assertIn("【固定层：核心记忆目录】", result)
+        self.assertIn("【开机核心｜固定核心目录】", result)
         self.assertNotIn("自主选择最相关的 1–2 条", result)
         self.assertIn("CORE-VISIBLE", result)
         self.assertNotIn("IMPORTANT-HIDDEN", result)

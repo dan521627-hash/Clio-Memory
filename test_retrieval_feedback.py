@@ -11,6 +11,7 @@ import numpy as np
 import server
 from bucket_manager import BucketManager
 from retrieval_feedback import RetrievalFeedbackStore
+from sqlite_utils import ClosingConnection
 
 
 def feedback_config(root: str) -> dict:
@@ -76,7 +77,9 @@ class RetrievalFeedbackStoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertLessEqual(abs(matching["useful"]), 5.0)
         self.assertEqual(unrelated, {})
 
-        with sqlite3.connect(self.store.db_path) as connection:
+        with sqlite3.connect(
+            self.store.db_path, factory=ClosingConnection
+        ) as connection:
             columns = {
                 row[1]
                 for row in connection.execute(

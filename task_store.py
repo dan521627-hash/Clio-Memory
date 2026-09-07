@@ -22,7 +22,11 @@ logger = logging.getLogger("ombre_brain.tasks")
 class TaskStore:
     """Keep tasks separate from memory bucket bodies."""
 
-    STATUSES = {"open", "completed", "cancelled"}
+    # ``status`` is kept as a compatibility column for existing databases.
+    # The user-facing workflow lives in ``workflow_state`` so older rows can be
+    # upgraded without rebuilding or risking the task ledger.
+    WORKFLOW_STATES = {"planned", "in_progress", "waiting", "completed"}
+    ACTIVE_WORKFLOW_STATES = {"planned", "in_progress", "waiting"}
 
     def __init__(self, config: dict):
         settings = config.get("tasks", {})
@@ -118,6 +122,27 @@ class TaskStore:
                     ON task_history(task_id, history_id DESC);
                 """
             )
+            task_columns = {
+                str(row["name"])
+                for row in connection.execute("PRAGMA table_info(tasks)").fetchall()
+            }
+            if "workflow_state" not in task_columns:
+                connection.execute(
+                    "ALTER TABLE tasks ADD COLUMN workflow_state TEXT NOT NULL DEFAULT 'planned'"
+                )
+                connection.execute(
+                    "UPDATE tasks SET workflow_state=CASE "
+                    "WHEN status='completed' THEN 'completed' "
+                    "WHEN status='cancelled' THEN 'completed' ELSE 'planned' END"
+                )
+            history_columns = {
+                str(row["name"])
+                for row in connection.execute("PRAGMA table_info(task_history)").fetchall()
+            }
+            if "workflow_state" not in history_columns:
+                connection.execute(
+                    "ALTER TABLE task_history ADD COLUMN workflow_state TEXT NOT NULL DEFAULT 'planned'"
+                )
 
     @staticmethod
     def _clean_title(value: str) -> str:
@@ -136,13 +161,36 @@ class TaskStore:
         return details
 
     @classmethod
-    def _clean_status(cls, value: str) -> str:
-        status = str(value or "open").strip().lower()
-        aliases = {"未完成": "open", "完成": "completed", "取消": "cancelled"}
-        status = aliases.get(status, status)
-        if status not in cls.STATUSES:
-            raise ValueError("状态只能是 open、completed 或 cancelled。")
-        return status
+    def _clean_workflow_state(cls, value: str) -> str:
+        state = str(value or "planned").strip().lower()
+        aliases = {
+            "open": "planned",
+            "cancelled": "completed",
+            "未完成": "planned",
+            "准备做": "planned",
+            "正在做": "in_progress",
+            "等待中": "waiting",
+            "完成": "completed",
+            "已完成": "completed",
+        }
+        state = aliases.get(state, state)
+        if state not in cls.WORKFLOW_STATES:
+            raise ValueError(
+                "状态只能是 planned、in_progress、waiting 或 completed。"
+            )
+        return state
+
+    @classmethod
+    def _public_row(cls, row: sqlite3.Row | dict | None) -> dict | None:
+        if row is None:
+            return None
+        item = dict(row)
+        state = str(item.get("workflow_state") or "").strip().lower()
+        if state not in cls.WORKFLOW_STATES:
+            state = "completed" if item.get("status") in {"completed", "cancelled"} else "planned"
+        item["workflow_state"] = state
+        item["status"] = state
+        return item
 
     @staticmethod
     def _clean_importance(value: int) -> int:
@@ -172,13 +220,16 @@ class TaskStore:
             INSERT INTO task_history (
                 task_id, snapshot_at, operation, title, details, status,
                 importance, created_at, updated_at, completed_at,
-                created_by, manual_updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                created_by, manual_updated_at, workflow_state
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 row["task_id"], now_iso(), operation, row["title"], row["details"],
                 row["status"], row["importance"], row["created_at"], row["updated_at"],
                 row["completed_at"], row["created_by"], row["manual_updated_at"],
+                row["workflow_state"] if "workflow_state" in row.keys() else (
+                    "completed" if row["status"] in {"completed", "cancelled"} else "planned"
+                ),
             ),
         )
 
@@ -220,8 +271,9 @@ class TaskStore:
             cursor = connection.execute(
                 """
                 INSERT INTO tasks (
-                    title, details, status, importance, created_at, updated_at, created_by
-                ) VALUES (?, ?, 'open', ?, ?, ?, ?)
+                    title, details, status, workflow_state, importance,
+                    created_at, updated_at, created_by
+                ) VALUES (?, ?, 'open', 'planned', ?, ?, ?, ?)
                 """,
                 (
                     self._clean_title(title), self._clean_details(details),
@@ -234,7 +286,7 @@ class TaskStore:
                 connection, task_id, source_type, source_ref, source_event_id, excerpt
             )
             row = connection.execute("SELECT * FROM tasks WHERE task_id=?", (task_id,)).fetchone()
-        return self._row(row)
+        return self._public_row(row)
 
     async def create(self, **kwargs) -> dict:
         return await asyncio.to_thread(self._create_sync, **kwargs)
@@ -245,7 +297,7 @@ class TaskStore:
             row = connection.execute(f"SELECT * FROM tasks WHERE {where}", (int(task_id),)).fetchone()
             if row is None:
                 return None
-            item = dict(row)
+            item = self._public_row(row) or {}
             item["sources"] = [
                 dict(source)
                 for source in connection.execute(
@@ -268,8 +320,15 @@ class TaskStore:
         clauses = [] if include_deleted else ["deleted_at IS NULL"]
         params: list = []
         if status:
-            clauses.append("status=?")
-            params.append(self._clean_status(status))
+            requested = str(status).strip().lower()
+            if requested == "open":
+                clauses.append("status='open'")
+            elif requested == "cancelled":
+                clauses.append("status='cancelled'")
+            else:
+                workflow_state = self._clean_workflow_state(requested)
+                clauses.append("workflow_state=?")
+                params.append(workflow_state)
         if before_id:
             clauses.append("task_id<?")
             params.append(int(before_id))
@@ -278,11 +337,12 @@ class TaskStore:
         with self._connect() as connection:
             rows = connection.execute(
                 f"SELECT * FROM tasks {where} "
-                "ORDER BY CASE status WHEN 'open' THEN 0 WHEN 'completed' THEN 1 ELSE 2 END, "
+                "ORDER BY CASE workflow_state WHEN 'in_progress' THEN 0 WHEN 'waiting' THEN 1 "
+                "WHEN 'planned' THEN 2 ELSE 3 END, "
                 "importance DESC, updated_at DESC, task_id DESC LIMIT ?",
                 params,
             ).fetchall()
-        return [dict(row) for row in rows]
+        return [self._public_row(row) for row in rows]
 
     async def list(self, **kwargs) -> list[dict]:
         return await asyncio.to_thread(self._list_sync, **kwargs)
@@ -322,26 +382,30 @@ class TaskStore:
             self._snapshot(connection, row, "manual_update" if manual else "auto_update")
             new_title = self._clean_title(title) if title is not None else row["title"]
             new_details = self._clean_details(details) if details is not None else row["details"]
-            new_status = self._clean_status(status) if status is not None else row["status"]
+            current_state = str(row["workflow_state"] or "planned")
+            new_workflow_state = (
+                self._clean_workflow_state(status) if status is not None else current_state
+            )
+            new_status = "completed" if new_workflow_state == "completed" else "open"
             new_importance = self._clean_importance(importance) if importance is not None else row["importance"]
             now = now_iso()
             completed_at = row["completed_at"]
             pending = int(row["completion_notice_pending"] or 0)
-            if new_status == "completed" and row["status"] != "completed":
+            if new_workflow_state == "completed" and current_state != "completed":
                 completed_at = now
                 pending = 1
-            elif new_status != "completed":
+            elif new_workflow_state != "completed":
                 completed_at = None
                 pending = 0
             manual_at = now if manual else row["manual_updated_at"]
             connection.execute(
                 """
-                UPDATE tasks SET title=?, details=?, status=?, importance=?, updated_at=?,
+                UPDATE tasks SET title=?, details=?, status=?, workflow_state=?, importance=?, updated_at=?,
                     completed_at=?, manual_updated_at=?, completion_notice_pending=?
                 WHERE task_id=?
                 """,
                 (
-                    new_title, new_details, new_status, new_importance, now,
+                    new_title, new_details, new_status, new_workflow_state, new_importance, now,
                     completed_at, manual_at, pending, int(task_id),
                 ),
             )
@@ -351,7 +415,7 @@ class TaskStore:
                     source_event_id, excerpt,
                 )
             updated = connection.execute("SELECT * FROM tasks WHERE task_id=?", (int(task_id),)).fetchone()
-        return dict(updated)
+        return self._public_row(updated)
 
     async def update(self, task_id: int, **kwargs) -> dict:
         return await asyncio.to_thread(self._update_sync, task_id, **kwargs)
@@ -390,7 +454,7 @@ class TaskStore:
             if row is None:
                 raise ValueError(f"找不到未竟事项 #{task_id}。")
             self._hard_delete_rows(connection, [int(task_id)])
-        item = dict(row)
+        item = self._public_row(row) or {}
         item["deleted_permanently"] = True
         self._compact_sync()
         return item
@@ -506,12 +570,15 @@ class TaskStore:
                     self._snapshot(connection, task, "source_correction_restore")
                     connection.execute(
                         """
-                        UPDATE tasks SET title=?, details=?, status=?, importance=?,
+                            UPDATE tasks SET title=?, details=?, status=?, workflow_state=?, importance=?,
                             updated_at=?, completed_at=?, completion_notice_pending=0
                         WHERE task_id=?
                         """,
                         (
                             history["title"], history["details"], history["status"],
+                            history["workflow_state"] if "workflow_state" in history.keys() else (
+                                "completed" if history["status"] in {"completed", "cancelled"} else "planned"
+                            ),
                             history["importance"], stamp, history["completed_at"], task_id,
                         ),
                     )
@@ -533,11 +600,14 @@ class TaskStore:
     def _count_sync(self) -> dict:
         with self._connect() as connection:
             rows = connection.execute(
-                "SELECT status, COUNT(*) AS count FROM tasks WHERE deleted_at IS NULL GROUP BY status"
+                "SELECT workflow_state, COUNT(*) AS count FROM tasks "
+                "WHERE deleted_at IS NULL GROUP BY workflow_state"
             ).fetchall()
-        counts = {"open": 0, "completed": 0, "cancelled": 0}
-        counts.update({row["status"]: int(row["count"]) for row in rows})
-        counts["total"] = sum(counts.values())
+        counts = {state: 0 for state in self.WORKFLOW_STATES}
+        counts.update({row["workflow_state"]: int(row["count"]) for row in rows})
+        counts["open"] = sum(counts[state] for state in self.ACTIVE_WORKFLOW_STATES)
+        counts["cancelled"] = 0
+        counts["total"] = sum(counts[state] for state in self.WORKFLOW_STATES)
         return counts
 
     async def counts(self) -> dict:
@@ -553,7 +623,7 @@ class TaskStore:
                 """,
                 (max(1, min(20, int(limit))),),
             ).fetchall()
-        return [dict(row) for row in rows]
+        return [self._public_row(row) for row in rows]
 
     async def pending_completions(self, limit: int = 5) -> list[dict]:
         return await asyncio.to_thread(self._pending_completions_sync, limit)

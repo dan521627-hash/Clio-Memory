@@ -8,6 +8,8 @@ import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 
+from sqlite_utils import ClosingConnection
+
 
 @dataclass(frozen=True)
 class PurgeRule:
@@ -95,7 +97,9 @@ class PermanentDeleteService:
             if not rule.database.exists():
                 counts[rule.label] = 0
                 continue
-            with sqlite3.connect(rule.database, timeout=30) as connection:
+            with sqlite3.connect(
+                rule.database, timeout=30, factory=ClosingConnection
+            ) as connection:
                 if not self._table_exists(connection, rule.count_sql):
                     counts[rule.label] = 0
                     continue
@@ -114,7 +118,9 @@ class PermanentDeleteService:
             if not rule.database.exists():
                 removed[rule.label] = 0
                 continue
-            with sqlite3.connect(rule.database, timeout=30) as connection:
+            with sqlite3.connect(
+                rule.database, timeout=30, factory=ClosingConnection
+            ) as connection:
                 if not self._table_exists(connection, rule.delete_sql):
                     removed[rule.label] = 0
                     continue

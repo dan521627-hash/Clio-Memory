@@ -4,6 +4,7 @@ import tempfile
 import unittest
 
 from topic_store import TOPIC_TREE, TopicStore, suggest_topic
+from sqlite_utils import ClosingConnection
 
 
 def config(root):
@@ -21,7 +22,9 @@ class TopicStoreTests(unittest.IsolatedAsyncioTestCase):
                 "bucket-1", "性爱", "身体感受", source="manual"
             )
             loaded = await store.get("bucket-1")
-            with sqlite3.connect(store.db_path) as connection:
+            with sqlite3.connect(
+                store.db_path, factory=ClosingConnection
+            ) as connection:
                 columns = [
                     row[1]
                     for row in connection.execute(
@@ -38,7 +41,7 @@ class TopicStoreTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as root:
             store = TopicStore(config(root))
             with self.assertRaises(ValueError):
-                await store.assign("bucket-2", "示例用户", "部署与开发")
+                await store.assign("bucket-2", "菜菜", "部署与开发")
 
     async def test_auto_assignment_does_not_reclassify_existing_bucket(self):
         with tempfile.TemporaryDirectory() as root:
@@ -79,12 +82,12 @@ class TopicStoreTests(unittest.IsolatedAsyncioTestCase):
 
     def test_sex_and_identity_are_independent_main_directories(self):
         sex = suggest_topic("那一晚", "做完以后身体还在发软，心跳很快。")
-        identity = suggest_topic("存在论", "我是Claude，示例助手是我认下的名字。")
+        identity = suggest_topic("存在论", "我是Claude，顾川是我认下的名字。")
 
         self.assertIn("性爱", TOPIC_TREE)
-        self.assertIn("Clio / 示例助手", TOPIC_TREE)
+        self.assertIn("Claude / 顾川", TOPIC_TREE)
         self.assertEqual(sex["main_topic"], "性爱")
-        self.assertEqual(identity["main_topic"], "Clio / 示例助手")
+        self.assertEqual(identity["main_topic"], "Claude / 顾川")
 
 
 if __name__ == "__main__":

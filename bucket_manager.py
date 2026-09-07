@@ -42,6 +42,7 @@ from rapidfuzz import fuzz
 from bm25_index import BM25Index
 from embedding_index import EmbeddingIndex
 from history_store import HistoryStore
+from memory_upgrade import canonical_topic, expanded_query
 from retrieval_feedback import RetrievalFeedbackStore
 from utils import generate_bucket_id, sanitize_name, safe_path, now_iso
 
@@ -174,7 +175,7 @@ class BucketManager:
         """
         bucket_id = generate_bucket_id()
         bucket_name = sanitize_name(name) if name else bucket_id
-        domain = domain or ["未分类"]
+        domain = [canonical_topic(item) for item in (domain or ["未分类"])]
         tags = tags or []
 
         # --- Pinned/protected buckets: lock importance to 10 ---
@@ -281,6 +282,10 @@ class BucketManager:
         if not current_bucket:
             logger.error("Cannot load current bucket before update: %s", bucket_id)
             return False
+        if "domain" in kwargs:
+            kwargs["domain"] = [
+                canonical_topic(item) for item in (kwargs.get("domain") or ["未分类"])
+            ]
         if "content" in kwargs:
             old_content = str(current_bucket.get("content", ""))
             next_content = str(kwargs["content"])
@@ -679,6 +684,9 @@ class BucketManager:
         if not query or not query.strip():
             return []
 
+        # Keep the exact user wording and search a bounded colloquial expansion too.
+        search_query = expanded_query(query)
+
         limit = limit or self.max_results
         all_buckets = await self.list_all(
             include_archive=False,
@@ -715,7 +723,7 @@ class BucketManager:
         query_vector = None
         if use_semantic:
             try:
-                semantic_query = self._normalize_semantic_query(query)
+                semantic_query = self._normalize_semantic_query(search_query)
                 if self.retrieval_feedback.enabled:
                     semantic_scores, query_vector = (
                         await self.embedding_index.query_scores_with_vector(semantic_query)
@@ -759,7 +767,7 @@ class BucketManager:
                 logger.warning("Retrieval feedback unavailable, using base ranking: %s", e)
 
         try:
-            bm25_scores = self.bm25_index.scores(query, candidates)
+            bm25_scores = self.bm25_index.scores(search_query, candidates)
         except Exception as e:
             logger.warning("BM25 unavailable, using fuzzy and semantic ranking: %s", e)
             bm25_scores = {}
@@ -772,7 +780,10 @@ class BucketManager:
 
             try:
                 # Dim 1: topic relevance (fuzzy text, 0~1)
-                topic_score = self._calc_topic_score(query, bucket)
+                topic_score = max(
+                    self._calc_topic_score(query, bucket),
+                    self._calc_topic_score(search_query, bucket),
+                )
                 bm25_score = bm25_scores.get(bucket["id"], 0.0)
 
                 # Dim 2: vector semantic similarity (cosine, normally 0~1)

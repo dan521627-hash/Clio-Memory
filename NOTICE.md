@@ -1,15 +1,19 @@
-# 作者与署名
+# 版权、署名与参考仓库
 
-Clio Memory 当前公开版本由 GitHub 用户 **dan521627-hash** 设计、改造并持续维护。
-项目基于 MIT 许可的 Ombre-Brain 继续开发，因此原始许可证中的上游版权声明仍依法保留。
+Clio Memory 2.0 的新增设计、代码改造、文档与发布图片：
 
-你可以依照 [MIT License](LICENSE) 使用、修改、分发或基于本项目继续开发，
-但必须在软件副本、派生版本或项目说明中保留维护者署名 **dan521627-hash**、原始仓库链接
-以及 MIT 许可证全文。不得删除或冒充原作者信息。
+Copyright (c) 2026 dan521627-hash
 
-建议署名格式：
+本项目包含基于 MIT License 发布的 Ombre-Brain 上游代码，原始版权声明与 MIT License 必须保留。2.0 新增原创部分的使用边界见 `LICENSE-NONCOMMERCIAL.md`。
 
-> Based on Clio Memory by dan521627-hash.
+发布修改版、演示版或衍生版本时，请保留以下署名：
 
-本公开仓库只包含脱敏代码与示例配置，不授予任何私人记忆、人物设定、数据、域名、
-密钥、提示词或部署环境的使用权。
+> Based on Clio Memory 2.0 by dan521627-hash.
+
+## 参考过的仓库
+
+- [@P0lar1zzZ/Ombre-Brain](https://github.com/P0lar1zzZ/Ombre-Brain)
+- [@qimingjiu/twig-memory](https://github.com/qimingjiu/twig-memory)
+- [@tianyupaipai-cmd/xinchao-nian](https://github.com/tianyupaipai-cmd/xinchao-nian)
+
+这里只列出参考过的仓库，不代表这些仓库的作者认可、维护或担保 Clio Memory。

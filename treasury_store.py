@@ -8,6 +8,7 @@ import sqlite3
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
+from sqlite_utils import ClosingConnection
 from utils import normalize_beijing_timestamp, now_iso
 
 
@@ -28,7 +29,9 @@ class TreasuryStore:
         self._initialize()
 
     def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.db_path, timeout=30)
+        connection = sqlite3.connect(
+            self.db_path, timeout=30, factory=ClosingConnection
+        )
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA journal_mode=WAL")
         connection.execute("PRAGMA synchronous=NORMAL")

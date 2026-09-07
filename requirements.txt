@@ -35,3 +35,6 @@ fastapi>=0.115.0,<1.0.0
 uvicorn>=0.34.0,<1.0.0
 pyzipper>=0.3.6,<1.0.0
 python-dotenv>=1.0.0,<2.0.0
+
+# Anima 养育室服务端凭证与私密问卷加密存储
+cryptography>=42.0.0,<51.0.0

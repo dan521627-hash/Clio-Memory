@@ -14,6 +14,7 @@ from pathlib import Path
 
 import numpy as np
 
+from sqlite_utils import ClosingConnection
 from utils import now_iso
 
 
@@ -54,7 +55,9 @@ class RetrievalFeedbackStore:
             self._init_db()
 
     def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.db_path, timeout=30)
+        connection = sqlite3.connect(
+            self.db_path, timeout=30, factory=ClosingConnection
+        )
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA journal_mode=WAL")
         connection.execute("PRAGMA synchronous=NORMAL")

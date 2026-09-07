@@ -37,7 +37,7 @@ class ManagerAuthenticationTests(unittest.TestCase):
         self.assertTrue(status["authenticated"])
         self.assertEqual(self.client.get("/api/health").status_code, 200)
 
-    def test_seen_button_keeps_push_for_ai_and_restarts_silence(self):
+    def test_seen_button_keeps_push_for_ai_without_starting_chat_activity(self):
         self.client.post(
             "/api/auth/login", json={"password": "test-mobile-password"}
         )
@@ -53,9 +53,7 @@ class ManagerAuthenticationTests(unittest.TestCase):
                 "acknowledged_at": "2026-08-11T20:00:00+08:00",
             }
         )
-        settle = AsyncMock(
-            return_value={"silence_started_at": "2026-08-11T20:00:00+08:00"}
-        )
+        settle = AsyncMock()
         purge_candidates = AsyncMock(return_value=1)
         with (
             patch.object(
@@ -79,10 +77,10 @@ class ManagerAuthenticationTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["status"], "acknowledged")
         acknowledge.assert_awaited_once()
-        settle.assert_awaited_once()
-        purge_candidates.assert_awaited_once_with([8])
+        settle.assert_not_awaited()
+        purge_candidates.assert_not_awaited()
 
-    def test_silence_ack_cancels_old_cycle_and_starts_active_presence(self):
+    def test_silence_ack_does_not_start_active_presence(self):
         self.client.post(
             "/api/auth/login", json={"password": "test-mobile-password"}
         )
@@ -98,14 +96,8 @@ class ManagerAuthenticationTests(unittest.TestCase):
                 "acknowledged_at": "2026-08-11T20:00:00+08:00",
             }
         )
-        observe = AsyncMock(
-            return_value={
-                "previous_cycle_id": 12,
-                "cycle_id": 13,
-                "active_started_at": "2026-08-11T20:00:00+08:00",
-            }
-        )
-        cancel = AsyncMock(return_value=1)
+        observe = AsyncMock()
+        cancel = AsyncMock()
         purge = AsyncMock(return_value=1)
         with (
             patch.object(
@@ -136,10 +128,9 @@ class ManagerAuthenticationTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["phase"], "silence")
         acknowledge.assert_awaited_once_with(44)
-        observe.assert_awaited_once()
-        self.assertTrue(observe.await_args.kwargs["interrupt_silence"])
-        cancel.assert_awaited_once_with(12)
-        purge.assert_awaited_once_with([44])
+        observe.assert_not_awaited()
+        cancel.assert_not_awaited()
+        purge.assert_not_awaited()
 
     def test_calendar_endpoint_uses_all_read_only_sources(self):
         self.client.post(
@@ -250,10 +241,7 @@ class ManagerAuthenticationTests(unittest.TestCase):
             )
 
         self.assertEqual(response.status_code, 200)
-        sidecar.assert_awaited_once()
-        self.assertEqual(
-            sidecar.await_args.kwargs["correction_key"], "timeline:current_city"
-        )
+        sidecar.assert_not_awaited()
 
     def test_timeline_api_survives_null_bucket_metadata(self):
         self.client.post(

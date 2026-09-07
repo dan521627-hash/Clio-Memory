@@ -19,6 +19,11 @@ services:
     environment:
       - OMBRE_API_KEY=${OMBRE_API_KEY}      # From .env file / 从 .env 文件读取
       - OMBRE_RESPONSE_SEAL=${OMBRE_RESPONSE_SEAL} # Response verification seal from host environment
+      - OMBRE_NURSERY_INTERNAL_TOKEN=${OMBRE_NURSERY_INTERNAL_TOKEN:-}
+      - OMBRE_NURSERY_VAULT_KEY=${OMBRE_NURSERY_VAULT_KEY:-}
+      - OMBRE_NURSERY_RULES_PATH=${OMBRE_NURSERY_RULES_PATH:-/app/nursery/capability-rules-v1.yaml}
+      - OMBRE_NURSERY_DB=${OMBRE_NURSERY_DB:-/data/nursery.sqlite3}
+      - OMBRE_NURSERY_VAULT_DIR=${OMBRE_NURSERY_VAULT_DIR:-/data/nursery-secrets}
       - OMBRE_DIAGNOSTIC_LOG=/data/logs/mcp_requests.log
       - OMBRE_TRANSPORT=streamable-http     # Claude.ai requires streamable-http
       - OMBRE_BUCKETS_DIR=/data             # Container-internal bucket path / 容器内路径
@@ -36,12 +41,8 @@ services:
       # 挂载你的 Obsidian 仓库（或任意宿主机目录）做持久化存储
       # Example / 示例:
       #   - /path/to/your/Obsidian Vault/Ombre Brain:/data
-      - type: bind
-        source: E:/Ombre-Brain/memory
-        target: /data
-      - type: bind
-        source: E:/Ombre-Brain/models
-        target: /models
+      - ${CLIO_DATA_DIR:-./data}:/data
+      - ${CLIO_MODEL_DIR:-./models}:/models
       - ./config.yaml:/app/config.yaml
 
   ombre-manager:
@@ -54,6 +55,10 @@ services:
     command: ["uvicorn", "manager_server:app", "--host", "0.0.0.0", "--port", "8787"]
     environment:
       - OMBRE_API_KEY=${OMBRE_API_KEY}
+      - CLIO_MANAGER_PASSWORD=${CLIO_MANAGER_PASSWORD}
+      - OMBRE_RESPONSE_SEAL=${OMBRE_RESPONSE_SEAL}
+      - OMBRE_NURSERY_INTERNAL_TOKEN=${OMBRE_NURSERY_INTERNAL_TOKEN:-}
+      - OMBRE_BRAIN_INTERNAL_URL=${OMBRE_BRAIN_INTERNAL_URL:-http://ombre-brain:8000}
       - OMBRE_BUCKETS_DIR=/data
       - OMBRE_EMBEDDING_DB=/data/embeddings.sqlite3
       - OMBRE_SUMMARY_CACHE_DB=/data/summaries.sqlite3
@@ -70,15 +75,9 @@ services:
       - OMBRE_EMBEDDING_CACHE_DIR=/models
       - CLIO_EXPORT_DIR=/exports
     volumes:
-      - type: bind
-        source: E:/Ombre-Brain/memory
-        target: /data
-      - type: bind
-        source: E:/Ombre-Brain/models
-        target: /models
-      - type: bind
-        source: E:/Ombre-Brain/exports
-        target: /exports
+      - ${CLIO_DATA_DIR:-./data}:/data
+      - ${CLIO_MODEL_DIR:-./models}:/models
+      - ${CLIO_EXPORT_DIR:-./exports}:/exports
       - ./config.yaml:/app/config.yaml:ro
     ports:
       - "127.0.0.1:8787:8787"

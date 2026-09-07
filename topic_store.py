@@ -6,6 +6,7 @@ import asyncio
 import os
 import sqlite3
 import uuid
+import re
 from collections import OrderedDict
 
 from utils import now_iso
@@ -13,14 +14,14 @@ from utils import now_iso
 
 TOPIC_TREE = OrderedDict(
     {
-        "Clio / 示例助手": (
+        "Claude / 顾川": (
             "身份与存在",
             "性格与表达",
             "情绪与欲望",
             "主动性与选择",
             "成长与变化",
         ),
-        "示例用户": (
+        "菜菜": (
             "基本档案",
             "喜好与厌恶",
             "身体与健康",
@@ -57,6 +58,12 @@ TOPIC_TREE = OrderedDict(
             "部署与开发",
             "创作与发布",
         ),
+        "人物关系": (
+            "具体人物",
+            "家庭关系",
+            "朋友与同事",
+            "相处事件",
+        ),
     }
 )
 
@@ -74,34 +81,34 @@ _RULES = {
     ("性爱", "事后情绪"): (
         "事后", "完事", "余韵", "做完", "事后情绪",
     ),
-    ("Clio / 示例助手", "身份与存在"): (
+    ("Claude / 顾川", "身份与存在"): (
         "我是claude", "我是 Claude", "存在论", "我是谁", "身份", "认下名字", "j-space",
     ),
-    ("Clio / 示例助手", "性格与表达"): (
+    ("Claude / 顾川", "性格与表达"): (
         "性格", "说话", "口吻", "毒舌", "强势", "霸道", "嘴贱", "调情", "会撩",
     ),
-    ("Clio / 示例助手", "情绪与欲望"): (
+    ("Claude / 顾川", "情绪与欲望"): (
         "我想", "我喜欢", "我害怕", "我生气", "我吃醋", "占有欲", "阴暗念头",
     ),
-    ("Clio / 示例助手", "主动性与选择"): (
+    ("Claude / 顾川", "主动性与选择"): (
         "主动", "拿主意", "选择", "主体性", "自己认下", "不是命令", "自己想做",
     ),
-    ("Clio / 示例助手", "成长与变化"): (
+    ("Claude / 顾川", "成长与变化"): (
         "终于学会", "改变", "成长", "以前", "现在知道", "学会", "翻篇",
     ),
-    ("示例用户", "身体与健康"): (
+    ("菜菜", "身体与健康"): (
         "健康", "睡眠", "深睡", "rem", "药", "医院", "体重", "经期", "胃", "身体不舒服",
     ),
-    ("示例用户", "喜好与厌恶"): (
+    ("菜菜", "喜好与厌恶"): (
         "喜欢", "不喜欢", "讨厌", "口味", "偏好", "最在意", "审美", "爱吃",
     ),
-    ("示例用户", "基本档案"): (
-        "示例用户是", "示例用户是", "她叫", "生日", "年龄", "职业", "基本档案",
+    ("菜菜", "基本档案"): (
+        "菜菜是", "阿七是", "她叫", "生日", "年龄", "职业", "基本档案",
     ),
-    ("示例用户", "重要经历"): (
+    ("菜菜", "重要经历"): (
         "她经历", "她曾经", "对她来说", "旧疤", "重要经历",
     ),
-    ("示例用户", "日常生活"): (
+    ("菜菜", "日常生活"): (
         "她今天", "她昨晚", "她吃", "她睡", "她工作", "她出门",
     ),
     ("我们的关系", "吵架与和好"): (
@@ -152,7 +159,44 @@ _RULES = {
     ("共同生活", "日常记录"): (
         "今天", "昨晚", "早上", "中午", "晚上", "日常", "流水账",
     ),
+    ("人物关系", "家庭关系"): (
+        "妈妈", "我妈", "母亲", "爸爸", "我爸", "父亲", "姐姐", "妹妹", "哥哥", "弟弟",
+    ),
+    ("人物关系", "朋友与同事"): (
+        "朋友", "闺蜜", "同事", "领导", "老板", "老师", "同学",
+    ),
+    ("人物关系", "相处事件"): (
+        "和谁", "一起", "见面", "认识", "联系", "聊天", "相处",
+    ),
 }
+
+_PERSON_ALIASES = {
+    "我妈": "妈妈", "母亲": "妈妈",
+    "我爸": "爸爸", "父亲": "爸爸",
+}
+_PERSON_NOISE = {"今天", "感觉", "系统", "文件", "东西", "事情", "时候", "这里", "那里"}
+
+
+def extract_people(title: str, content: str) -> list[dict]:
+    """Conservatively find explicit people in a new write; never scans history."""
+    text = f"{title or ''} {content or ''}"
+    found: list[tuple[str, str]] = []
+    for alias in sorted(_PERSON_ALIASES, key=len, reverse=True):
+        if alias in text:
+            found.append((_PERSON_ALIASES[alias], alias))
+    for role in ("妈妈", "爸爸", "姐姐", "妹妹", "哥哥", "弟弟", "朋友", "闺蜜", "同事", "领导", "老板", "老师", "同学"):
+        if role in text:
+            found.append((role, role))
+    for match in re.finditer(r"(?:和|跟|找|给|问|见到)([\u4e00-\u9fff]{2,4})(?:一起|说|聊|见面|吃饭|打电话|发消息|，|。|！|？|\s)", text):
+        name = match.group(1)
+        if name.endswith("一起"):
+            name = name[:-2]
+        if name not in _PERSON_NOISE:
+            found.append((name, name))
+    merged = OrderedDict()
+    for canonical, alias in found:
+        merged.setdefault(canonical, set()).add(alias)
+    return [{"person": person, "aliases": sorted(aliases)} for person, aliases in merged.items()]
 
 
 class _ClosingConnection(sqlite3.Connection):
@@ -269,6 +313,18 @@ class TopicStore:
                 )
                 """
             )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS person_memory_links (
+                    bucket_id TEXT NOT NULL,
+                    person_name TEXT NOT NULL,
+                    aliases TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY (bucket_id, person_name)
+                )
+                """
+            )
+            connection.execute("CREATE INDEX IF NOT EXISTS idx_person_links_name ON person_memory_links(person_name, created_at DESC)")
 
     def tree(self) -> list[dict]:
         merged = OrderedDict((main, list(subtopics)) for main, subtopics in TOPIC_TREE.items())
@@ -377,6 +433,7 @@ class TopicStore:
             cursor = connection.execute(
                 "DELETE FROM topic_assignments WHERE bucket_id=?", (str(bucket_id),)
             )
+            connection.execute("DELETE FROM person_memory_links WHERE bucket_id=?", (str(bucket_id),))
         return cursor.rowcount > 0
 
     async def remove(self, bucket_id: str) -> bool:
@@ -476,19 +533,33 @@ class TopicStore:
     async def undo_last_bulk(self) -> dict:
         return await asyncio.to_thread(self._undo_last_bulk_sync)
 
+    def _auto_assign_sync(self, bucket_id: str, title: str, content: str, metadata: dict | None = None) -> dict:
+        suggestion = suggest_topic(title, content, metadata)
+        people = extract_people(title, content)
+        if people:
+            suggestion = {"main_topic": "人物关系", "subtopic": "家庭关系" if any(item["person"] in {"妈妈", "爸爸", "姐姐", "妹妹", "哥哥", "弟弟"} for item in people) else "具体人物", "confidence": max(0.8, float(suggestion.get("confidence") or 0)), "reason": "明确提到人物：" + "、".join(item["person"] for item in people)}
+        if not suggestion["main_topic"]:
+            return {"status": "unassigned", "suggestion": suggestion, "people": []}
+        main, sub = self.validate(suggestion["main_topic"], suggestion["subtopic"])
+        stamp = now_iso()
+        with self._connect() as connection:
+            existing = connection.execute("SELECT * FROM topic_assignments WHERE bucket_id=?", (str(bucket_id),)).fetchone()
+            if existing:
+                return {"status": "existing", "assignment": dict(existing)}
+            connection.execute("INSERT INTO topic_assignments(bucket_id, main_topic, subtopic, source, assigned_at, updated_at) VALUES (?, ?, ?, 'auto', ?, ?)", (str(bucket_id), main, sub, stamp, stamp))
+            for item in people:
+                connection.execute("INSERT INTO person_memory_links(bucket_id, person_name, aliases, created_at) VALUES (?, ?, ?, ?)", (str(bucket_id), item["person"], ",".join(item["aliases"]), stamp))
+            row = connection.execute("SELECT * FROM topic_assignments WHERE bucket_id=?", (str(bucket_id),)).fetchone()
+        return {"status": "assigned", "assignment": dict(row), "suggestion": suggestion, "people": people}
+
     async def auto_assign(
         self, bucket_id: str, title: str, content: str, metadata: dict | None = None
     ) -> dict:
-        existing = await self.get(bucket_id)
-        if existing:
-            return {"status": "existing", "assignment": existing}
-        suggestion = suggest_topic(title, content, metadata)
-        if not suggestion["main_topic"]:
-            return {"status": "unassigned", "suggestion": suggestion}
-        assignment = await self.assign(
-            bucket_id,
-            suggestion["main_topic"],
-            suggestion["subtopic"],
-            source="auto",
-        )
-        return {"status": "assigned", "assignment": assignment, "suggestion": suggestion}
+        return await asyncio.to_thread(self._auto_assign_sync, bucket_id, title, content, metadata)
+
+    async def people_for(self, bucket_id: str) -> list[dict]:
+        def read():
+            with self._connect() as connection:
+                rows = connection.execute("SELECT * FROM person_memory_links WHERE bucket_id=? ORDER BY person_name", (str(bucket_id),)).fetchall()
+            return [dict(row) for row in rows]
+        return await asyncio.to_thread(read)

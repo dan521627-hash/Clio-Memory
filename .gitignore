@@ -16,6 +16,13 @@ private/*
 *.tar
 *.tar.gz
 *.zip
+*.bak
+*.backup
+*.pem
+*.key
+credentials*
+secrets*
+backups/
 __pycache__/
 *.py[cod]
 .pytest_cache/

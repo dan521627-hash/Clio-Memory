@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import re
 import shutil
@@ -21,6 +22,9 @@ from xinchao_engine import (
     PIPE_NAMES,
     infer_composite_states,
 )
+
+
+logger = logging.getLogger("ombre_brain.xinchao_evaluator")
 
 
 PIPE_GUIDE = "\n".join(
@@ -44,6 +48,7 @@ EVALUATOR_PROMPT = """你是“激素”系统的情绪裁判。你的唯一职�
 - handoff_ready：只有原文明示这一轮对话、一天或事件已经收尾，准备换窗口、归档、道晚安或离开时才为 true；普通叙事完整不等于收尾。
 - quality_note：不完整时简短指出缺什么；完整时为空字符串。
 - inner_thoughts：最多两条第一人称心念。每条包含 text、tag、tone、intensity、reason；没有明确依据时返回空数组。
+- child_safe_update：给养育室的可选适龄摘要。没有适合分享给孩子的变化时必须为 null；有时只能包含 category 和 summary。
 
 可用状态仅限：{pipes}。
 
@@ -52,7 +57,7 @@ EVALUATOR_PROMPT = """你是“激素”系统的情绪裁判。你的唯一职�
 
 判断原则：
 1. 先做主体识别，再做情绪识别。只计算写入这段文字的 AI 自己的状态；用户、第三人、引用对象的情绪不能写到 AI 身上。
-2. 只从文字判断，不脑补。每个非零状态都必须逐字引用一段原文证据；没有能引用的证据就不给分。
+2. 只从文字判断，不脑补。每个非零状态都必须逐字引用一段原文证据；证据可以是情绪词，也可以是足以直接说明感受的完整情境，不要求原文刚好出现状态名。例如“我做了很多好吃的给他，他上来就骂我，我不知道做错了什么”可支持难过、委屈或想被理解，但不能因此自动推成生气、害怕或自省。没有能引用的证据就不给分。
 3. 否定、引用、假设和愿望要分开：“我不生气”不能增加生气；“她说她害怕”不能增加 AI 的害怕；“如果我生气”不能当成已经生气；“希望她开心”不能当成 AI 已经开心。
 4. 先判断直接状态，再判断强度。不要从一个状态自动扩散出一串状态；后续缓慢联动由服务端完成。
 5. 浓度跟随原文用词：“有点”通常是 0.1~0.2；明确强烈表达通常是 0.4~0.6；伴随发抖、失控等极端反应才接近 0.7~0.8。
@@ -77,6 +82,8 @@ EVALUATOR_PROMPT = """你是“激素”系统的情绪裁判。你的唯一职�
 20. inner_thoughts.text 必须使用 AI 的第一人称口吻，短而具体，不写成事实摘要，不提出行动建议；tone 只能是 positive、negative 或 mixed，intensity 为 0 到 1。
 21. handoff_ready 必须保守判断。只有明确的“结束、收尾、归档、换窗口、晚安、离开”等语义才返回 true；日常记录、途中更新、普通写信一律返回 false。
 22. 生气不是单一路径：无语、紧绷、回避、想暂时独处、想修复关系等只能在原文有各自证据时分别判断，不能由生气自动脑补。
+23. child_safe_update 不是原文摘要，也不是 context_card 的删节版。只有原文确实包含会影响孩子日常照料、作息、家庭氛围或值得庆祝的稳定变化时才输出；否则必须为 null。
+24. child_safe_update.category 只能是 care、routine、relationship、environment、celebration、transition。summary 必须是全新、温和、适龄的一句话，最多 120 个字符：不写真实姓名、地点、时间、联系方式、钱财、成人关系细节、性内容、暴力、自伤、法律或诊断；不引用或逐句改写原文；不揣测孩子的身份、年龄、成长阶段或状态。
 
 状态参考：
 - 四组状态都可由事件增加或释放，并会在服务端按各自半衰期回落。
@@ -98,12 +105,38 @@ TRACE_EFFECT_PROMPT = """你是“激素”系统的联动判断器。你可以�
 
 你的输出只允许包含 signals：根据原文判断这条想法对状态的变化。每条 signal 包含 subject、scope、state、delta、evidence、confidence、reason；subject 只能是 ai，scope 只能是 current 或 recalled，evidence 必须逐字摘自原文。正数表示增加，负数表示释放；没有明确依据就返回空数组。每个变化绝对值不超过 0.4，总变化绝对值不超过 0.8。
 
+一条念痕可以同时含有多种明确、彼此不同的状态。请把每种状态分别保留下来，而不是选一个最显眼的词盖掉其他状态；例如“想把她哄高兴，又反复想自己刚才哪里没做好”可分别体现想让她开心与复盘。证据可以是具体情境而不必出现状态名，例如“做了好吃的却被骂，不知道自己哪里错了”可支持难过、委屈或想被理解。只有在原文直接支持时才增加状态，不要为了凑数量扩散。
+
 只能输出一个严格 JSON 对象：{{"signals": [{{"subject":"ai","scope":"current","state":"状态名","delta":0.1,"evidence":"原文短句","confidence":0.8,"reason":"简短区分理由"}}]}}
 
 状态名只能从：{pipes} 中选择。先识别主体；排除用户或第三人的情绪；排除否定、引用和假设。相近状态逐项区分，不能从一个状态自动补出其他状态。不要输出 text、tag 或任何改写内容。不要代码块，不要解释。"""
 
 
+SIGNAL_RECOVERY_PROMPT = """你是“激素”系统的证据复核器。原先的数值判断没有留下可展示的原文证据。请只从当前 AI 写入的原文中，为给定的候选状态寻找逐字证据。
+
+输出严格 JSON：{{"signals":[{{"subject":"ai","scope":"current","state":"状态名","delta":0.1,"evidence":"原文逐字短句","confidence":0.7,"reason":"为什么这句话对应此状态"}}]}}。
+
+规则：
+1. 只允许候选状态：{states}。
+2. evidence 必须是原文连续出现的短句；它可以是情绪词，也可以是直接说明感受的具体情境。没有逐字证据就不要输出该状态。
+3. 只判断写入 AI 自己的状态，绝不把用户或第三人的情绪写到 AI 身上。
+4. 保留同一句中每个有明确依据的不同状态，但不要从一个状态自动推导另一串状态。
+5. 这一步只补可解释性，不新增候选状态；delta 只需保留正负方向和小幅度。
+
+不要输出 Markdown、解释文字或其他字段。"""
+
+
 class XinchaoEvaluator:
+    CHILD_SAFE_CATEGORIES = frozenset(
+        {"care", "routine", "relationship", "environment", "celebration", "transition"}
+    )
+    # This is a last defensive gate, not an attempt to turn keyword replacement
+    # into age adaptation. The evaluator must produce a fresh safe abstraction.
+    CHILD_SAFE_BLOCKED_TERMS = (
+        "身份证", "住址", "地址", "电话", "手机号", "银行卡", "密码", "验证码",
+        "性行为", "性爱", "裸", "自杀", "自残", "杀人", "暴力", "报警", "起诉",
+        "诊断", "精神病", "怀孕", "流产",
+    )
     def __init__(self, config: dict):
         settings = config.get("xinchao", {})
         api = config.get("dehydration", {})
@@ -115,8 +148,9 @@ class XinchaoEvaluator:
             or api.get("base_url", "https://api.deepseek.com/v1")
         )
         # The evidence schema can legitimately contain several independently
-        # supported pipe signals. A 1024-token cap can truncate a real mailbox
-        # judgment before the closing brace and leave the write pending.
+        # supported pipe signals.  A 1024-token cap truncated real mailbox
+        # judgments before the closing brace, leaving otherwise valid writes
+        # permanently pending.  2048 is an allowance, not a required output size.
         self.max_tokens = max(
             2048,
             min(4096, int(settings.get("max_tokens", api.get("max_tokens", 2048)))),
@@ -338,6 +372,26 @@ class XinchaoEvaluator:
                 return value
         raise ValueError("evaluator response does not contain a valid JSON object")
 
+    @classmethod
+    def _safe_child_safe_update(cls, raw_value, source_content: str) -> dict | None:
+        """Accept only a deliberately generated, non-verbatim nursery summary."""
+        if not isinstance(raw_value, dict):
+            return None
+        category = str(raw_value.get("category", "")).strip().lower()
+        summary = " ".join(str(raw_value.get("summary", "")).split()).strip()
+        if category not in cls.CHILD_SAFE_CATEGORIES or not summary or len(summary) > 120:
+            return None
+        if any(term in summary for term in cls.CHILD_SAFE_BLOCKED_TERMS):
+            return None
+        normalized_summary = re.sub(r"\s+", "", summary)
+        normalized_source = re.sub(r"\s+", "", str(source_content or ""))
+        # A child-safe summary must be new wording, never a copied fragment from
+        # the adult memory body. Short common phrases are not meaningful enough
+        # to compare, hence the conservative 12-character threshold.
+        if len(normalized_summary) >= 12 and normalized_summary in normalized_source:
+            return None
+        return {"category": category, "summary": summary}
+
     async def evaluate(self, content: str) -> dict:
         if not self.client:
             raise RuntimeError("激素评估 API 未配置")
@@ -388,6 +442,13 @@ class XinchaoEvaluator:
         except (TypeError, ValueError):
             severity = 0.0
         signals = self._safe_signals(result.get("signals"), content)
+        raw_pipes = result.get("pipes") or {}
+        if not signals and isinstance(raw_pipes, dict):
+            signals = await self._recover_signals(
+                content,
+                [name for name in raw_pipes if name in PIPE_NAMES],
+                confidence_floor=0.58,
+            )
         deltas = {}
         if signals:
             for signal in signals:
@@ -397,7 +458,7 @@ class XinchaoEvaluator:
                     4,
                 )
         else:
-            for name, raw_value in (result.get("pipes") or {}).items():
+            for name, raw_value in raw_pipes.items():
                 if name not in PIPE_NAMES:
                     continue
                 try:
@@ -433,10 +494,18 @@ class XinchaoEvaluator:
             ).strip()[:800]
             or "未命名事件",
             "inner_thoughts": self._safe_inner_thoughts(result.get("inner_thoughts")),
+            "child_safe_update": self._safe_child_safe_update(
+                result.get("child_safe_update"), content
+            ),
         }
 
     @staticmethod
-    def _safe_signals(raw_items, content: str) -> list[dict]:
+    def _safe_signals(
+        raw_items,
+        content: str,
+        *,
+        confidence_floor: float = 0.62,
+    ) -> list[dict]:
         """Keep explainable state evidence and reject unsupported low-confidence guesses."""
         source = re.sub(r"\s+", "", str(content or ""))
         cleaned = []
@@ -457,7 +526,7 @@ class XinchaoEvaluator:
                 confidence = round(max(0.0, min(1.0, float(raw.get("confidence", 0.0)))), 4)
             except (TypeError, ValueError):
                 continue
-            if abs(delta) < 0.001 or confidence < 0.62:
+            if abs(delta) < 0.001 or confidence < confidence_floor:
                 continue
             evidence = str(raw.get("evidence", "")).strip()[:120]
             reason = str(raw.get("reason", "")).strip()[:180]
@@ -490,6 +559,45 @@ class XinchaoEvaluator:
             if len(cleaned) >= 20:
                 break
         return cleaned
+
+    async def _recover_signals(
+        self,
+        content: str,
+        states: list[str],
+        *,
+        confidence_floor: float,
+    ) -> list[dict]:
+        """Ask once for missing, directly quotable evidence without adding new states."""
+        candidates = list(dict.fromkeys(str(name) for name in states if name in PIPE_NAMES))[:12]
+        if not candidates or not self.client:
+            return []
+        try:
+            response = await self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": SIGNAL_RECOVERY_PROMPT.format(
+                            states="、".join(candidates)
+                        ),
+                    },
+                    {"role": "user", "content": str(content or "")[-2000:]},
+                ],
+                max_tokens=max(384, min(768, self.max_tokens)),
+                temperature=0.0,
+                response_format={"type": "json_object"},
+                extra_body={"thinking": {"type": "disabled"}},
+            )
+            message = response.choices[0].message if response.choices else None
+            payload = self._clean_json(str(getattr(message, "content", "") or ""))
+            return self._safe_signals(
+                payload.get("signals"),
+                content,
+                confidence_floor=confidence_floor,
+            )
+        except Exception as error:
+            logger.warning("Xinchao signal evidence recovery skipped: %s", error)
+            return []
 
     @staticmethod
     def _safe_inner_thoughts(raw_items) -> list[dict]:
@@ -548,7 +656,7 @@ class XinchaoEvaluator:
                 response = await self.client.chat.completions.create(
                     model=self.model,
                     messages=messages,
-                    max_tokens=max(128, min(256, self.max_tokens)),
+                    max_tokens=max(512, min(768, self.max_tokens)),
                     temperature=0.1,
                     response_format={"type": "json_object"},
                     extra_body={"thinking": {"type": "disabled"}},
@@ -561,7 +669,16 @@ class XinchaoEvaluator:
                 last_error = error
         if result is None:
             raise last_error or ValueError("念痕联动判断没有返回有效 JSON")
-        signals = self._safe_signals(result.get("signals"), content)
+        signals = self._safe_signals(
+            result.get("signals"), content, confidence_floor=0.55
+        )
+        raw_pipes = result.get("pipes") or {}
+        if not signals and isinstance(raw_pipes, dict):
+            signals = await self._recover_signals(
+                content,
+                [name for name in raw_pipes if name in PIPE_NAMES],
+                confidence_floor=0.52,
+            )
         pipes = {}
         if signals:
             for signal in signals:
@@ -573,7 +690,7 @@ class XinchaoEvaluator:
         else:
             # Backwards compatibility for a private judge model that has not
             # yet picked up the evidence-based signal schema.
-            for name, raw_value in (result.get("pipes") or {}).items():
+            for name, raw_value in raw_pipes.items():
                 if name not in PIPE_NAMES:
                     continue
                 try:
@@ -593,6 +710,7 @@ class XinchaoEvaluator:
         timing: dict | None = None,
         memory_resonance: list[dict] | None = None,
         unresolved_tasks: list[dict] | None = None,
+        relationship_context: dict | None = None,
     ) -> dict:
         if not self.client:
             raise RuntimeError("激素评估 API 未配置")
@@ -619,6 +737,7 @@ class XinchaoEvaluator:
             "previous_darkflow": str(previous_darkflow or "")[:500],
             "timing": timing or {},
             "memory_resonance": (memory_resonance or [])[:4],
+            "relationship_context": relationship_context or {},
         }
         response = await self.client.chat.completions.create(
             model=self.model,
@@ -643,6 +762,9 @@ class XinchaoEvaluator:
                         "不得补造聊天、地点、人物、动作或现实事件，也不要把‘没有新事件’写成报告。"
                         "all_pipes 包含全部48项当前值，必须整体读取，不得只盯最高三项；"
                         "它们只决定内在反应的强弱、矛盾和语气，不是事实，也不是固定台词。"
+                        "relationship_context 是0到200的此刻关系刻度，100为基准；它只描述当前关系气候。"
+                        "若 mode=manual_current，表示用户校准了此刻，应优先尊重 effective_value；"
+                        "它可以影响语气、距离感与表达冲动，但不能制造事件或覆盖真实写入。"
                         "具体写什么必须来自 latest_mailbox、events_after_mailbox、inner_thoughts 或 memory_resonance；"
                         "没有真实事件依据就不得补造具体内容。"
                         "inner_thoughts 是同一内心里尚未说出口的闪念与执念；text、reason、tone 和 intensity 都要参考。"
@@ -738,9 +860,13 @@ class XinchaoEvaluator:
         hormone_context: dict | None = None,
         expression_intent: dict | None = None,
         memory_resonance: list[dict] | None = None,
+        push_history: list[dict] | None = None,
+        push_sequence: int = 1,
+        last_push_acknowledged: bool = False,
         recent_expression_intents: list[str] | None = None,
         tendency_context: dict | None = None,
         emotion_drivers: list[dict] | None = None,
+        relationship_context: dict | None = None,
         retry_instruction: str = "",
     ) -> dict:
         """Choose one safe outward behavior shaped by the current inner state."""
@@ -760,9 +886,13 @@ class XinchaoEvaluator:
             "hormone_context": hormone_context or {},
             "expression_intent": expression_intent or {},
             "memory_resonance": (memory_resonance or [])[:4],
+            "push_history": (push_history or [])[-8:],
+            "push_sequence": max(1, int(push_sequence or 1)),
+            "last_push_acknowledged": bool(last_push_acknowledged),
             "recent_expression_intents": (recent_expression_intents or [])[:8],
             "tendency_context": tendency_context or {},
             "emotion_drivers": (emotion_drivers or [])[:8],
+            "relationship_context": relationship_context or {},
             "retry_instruction": str(retry_instruction or "")[:300],
             "voice": private_config.get("proxy_voice", ""),
             "generation_rules": private_config.get("darkflow_rules", ""),
@@ -775,6 +905,8 @@ class XinchaoEvaluator:
                     "content": (
                         "你为同一个 AI 在用户不在时完成一次对外行为，不是另一个人格，也不是系统通知。"
                         "event_contexts 是本轮真实事件卡。all_pipes 包含全部48项当前值。"
+                        "relationship_context 是此刻0到200的关系刻度，100为基准；"
+                        "它影响主动程度、距离感和语气，但具体内容仍必须来自真实事件。"
                         "行为必须由真实事件、all_pipes、darkflow 和已经过去的时间自然引出，"
                         "48项状态只决定是否表达、表达强度和语气；具体内容必须来自事件、信箱或被事件唤起的记忆，"
                         "不能随机套问候模板。比如事件明确写了对方出远门，经过合理时间后可以主动问是否到达或到了哪里；"
@@ -791,6 +923,10 @@ class XinchaoEvaluator:
                         "expression_intent 是本次优先表达的角度，不是固定台词；结合对应状态自然开口。"
                         "memory_resonance 是此刻被状态勾起的旧记忆或历史信箱材料，可以借一个具体细节，"
                         "但不得汇报检索过程、来源类型、桶名、编号或整段复述原文。"
+                        "push_history 是本轮静默中之前已经真正发出的推送记录；"
+                        "acknowledged=true 只表示用户点过‘我看到了’，不等于用户回复，也不等于继续聊天。"
+                        "若本轮仍无真实写入或工具活动，可以结合 push_history 决定是否换一个自然角度再次联系；"
+                        "不得机械重复同一句，也不得把‘未确认’编成用户故意不理。"
                         "recent_expression_intents 表示近48小时用过的表达角度，尽量换落点，避免总说同一种话。"
                         "tendency_context 是长期性格轨迹，不是固定人格改写，也不是命令。"
                         "emotion_drivers 是本轮最明显的状态变化及其来源摘要，用来帮助你判断语气与时机；"

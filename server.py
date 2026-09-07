@@ -41,7 +41,7 @@
 #       xinchao_status — Read the current emotional sidecar state
 #                只读查看当前心潮状态
 #       inner_state — Inspect private thoughts, resonance, and tension
-#                只读查看心念、记忆共振与内在张力
+#                只读查看心念、记忆回响与内在牵引
 #
 # Startup:
 # 启动方式：
@@ -85,6 +85,7 @@ from history_retention import HistoryRetentionEngine
 from living_memory import LivingMemoryStore
 from mailbox_store import MailboxStore
 from mailbox_search import search_mailbox
+from memory_upgrade import mailbox_continuity, retrieval_reason, self_awareness
 from memory_segments import split_memory_segments
 from relation_store import RelationStore
 from request_diagnostics import (
@@ -98,6 +99,18 @@ from topic_store import TOPIC_TREE, TopicStore, validate_topic
 from treasury_store import TreasuryStore
 from utils import beijing_now, load_config, setup_logging
 from xinchao_store import XinchaoService
+
+try:
+    from nursery.http_api import register_nursery_internal_routes
+    from nursery.external_tools import ExternalNurseryTools
+    from nursery.interaction_service import NurseryInteractionService
+    from nursery.mcp_tools import register_external_nursery_mcp_tools
+    from nursery.models import NurseryError, SourceType
+except ImportError:
+    # Existing deployment images do not package nursery/ yet. Keep the current
+    # service startable until Docker/VPS changes receive separate approval.
+    register_nursery_internal_routes = None
+    SourceType = None
 
 # --- Load config & init logging / 加载配置 & 初始化日志 ---
 config = load_config()
@@ -585,19 +598,7 @@ def _render_pulse_boot_items(
 
 
 async def _pulse_boot_mailbox_context() -> dict | None:
-    try:
-        messages = await mailbox_store.list(limit=100)
-    except Exception as error:
-        logger.warning("pulse_boot mailbox read failed: %s", error)
-        return None
-    latest = next(
-        (
-            item
-            for item in messages
-            if item.get("source_tool") != "xinchao_settlement"
-        ),
-        None,
-    )
+    latest = await _settlement_mailbox_context()
     if not latest:
         return None
     try:
@@ -624,6 +625,32 @@ async def _pulse_boot_mailbox_context() -> dict | None:
             for item in related
         ],
     }
+
+
+async def _settlement_mailbox_context() -> dict | None:
+    """Read the latest real handoff without running semantic retrieval.
+
+    The minute-level settlement worker must never wait behind the embedding
+    model merely to identify the mailbox anchor.  Related-message retrieval is
+    useful for pulse_boot, but darkflow already has its own bounded memory
+    resonance input and only needs the latest authoritative handoff here.
+    """
+    try:
+        messages = await mailbox_store.list(limit=100)
+    except Exception as error:
+        logger.warning("settlement mailbox read failed: %s", error)
+        return None
+    latest = next(
+        (
+            item
+            for item in messages
+            if item.get("source_tool") != "xinchao_settlement"
+        ),
+        None,
+    )
+    if not latest:
+        return None
+    return latest
 
 
 _MAILBOX_CONTEXT_UNSET = object()
@@ -957,6 +984,9 @@ async def _xinchao_task_context_provider(
 xinchao_service.set_memory_resonance_provider(
     _xinchao_memory_resonance_provider
 )
+behavior_service.set_memory_resonance_provider(
+    _xinchao_memory_resonance_provider
+)
 # 未竟、时间线和小金库只用于管理与展示，不进入情绪判断。
 # 暗涌与推送只读取当前状态，不再把输出反向写回48项状态。
 behavior_service.set_tendency_provider(
@@ -1065,6 +1095,285 @@ async def _record_xinchao_event(
         return {"status": "pending", "error": str(error)}
 
 
+_NURSERY_SAFE_EVENT_FIELDS = (
+    "source_key",
+    "source_version",
+    "category",
+    "child_safe_summary",
+    "occurred_at",
+)
+
+
+def _anima_nursery_source_type(source_key: object):
+    """Accept only the two opaque Xinchao source namespaces."""
+
+    value = str(source_key or "").strip()
+    if SourceType is None:
+        return None
+    if value.startswith("mailbox:") and value.removeprefix("mailbox:").strip():
+        return SourceType.MAILBOX_EVENT
+    if value.startswith("memory:") and value.removeprefix("memory:").strip():
+        return SourceType.ANIMA_MEMORY
+    return None
+
+
+def _anima_nursery_reference(value: object, expected_source_key: str) -> dict | None:
+    """Keep only opaque safe provenance; never pass a source body onward."""
+
+    if not isinstance(value, dict):
+        return None
+    source_key = str(value.get("source_key") or "").strip()
+    source_version = str(value.get("source_version") or "").strip()
+    if (
+        source_key != str(expected_source_key).strip()
+        or not source_version
+        or _anima_nursery_source_type(source_key) is None
+    ):
+        return None
+    return {"source_key": source_key, "source_version": source_version}
+
+
+def _anima_nursery_safe_event(value: object, expected_source_key: str) -> dict | None:
+    """Project Xinchao's child-safe export to its fixed five-field contract."""
+
+    if not isinstance(value, dict):
+        return None
+    event = {field: value.get(field) for field in _NURSERY_SAFE_EVENT_FIELDS}
+    if _anima_nursery_reference(event, expected_source_key) is None:
+        return None
+    if any(not str(event.get(field) or "").strip() for field in _NURSERY_SAFE_EVENT_FIELDS):
+        return None
+    return event
+
+
+def _anima_nursery_source_key(source_tool: str, source_ref: str) -> str:
+    """Map successful Brain writes to the only family-event source keys."""
+
+    reference = str(source_ref or "").strip()
+    if not reference:
+        return ""
+    if source_tool == "mailbox":
+        return f"mailbox:{reference}"
+    if source_tool in {"hold", "grow"}:
+        return f"memory:{reference}"
+    return ""
+
+
+def _nursery_lifecycle_error_code(error: Exception) -> str:
+    """Log an opaque code/class only; an exception must never reveal a source."""
+
+    return str(getattr(error, "code", "") or type(error).__name__)
+
+
+def _nursery_source_not_found(error: Exception) -> bool:
+    return str(getattr(error, "code", "")).strip() == "SOURCE_NOT_FOUND"
+
+
+async def _anima_nursery_references(source_key: str) -> list[dict]:
+    """Read only Xinchao's safe provenance for one source identity."""
+
+    if _anima_nursery_source_type(source_key) is None:
+        return []
+    try:
+        references = await asyncio.to_thread(
+            xinchao_service.child_safe_source_references_for_nursery, source_key
+        )
+    except Exception as error:
+        logger.warning(
+            "Nursery provenance lookup failed for %s: %s",
+            source_key,
+            _nursery_lifecycle_error_code(error),
+        )
+        return []
+    if not isinstance(references, (list, tuple)):
+        logger.warning("Nursery provenance lookup returned no references for %s", source_key)
+        return []
+    return [
+        reference
+        for value in references
+        if (reference := _anima_nursery_reference(value, source_key)) is not None
+    ]
+
+
+async def _mailbox_nursery_references(message_id: int) -> list[dict]:
+    return await _anima_nursery_references(f"mailbox:{int(message_id)}")
+
+
+async def _anima_nursery_runtime():
+    """Use Brain's in-process nursery runtime, never its internal HTTP API."""
+
+    if nursery_internal_api is None:
+        return None
+    try:
+        return await asyncio.to_thread(nursery_internal_api.provider.get)
+    except Exception as error:
+        logger.warning(
+            "Nursery lifecycle runtime unavailable: %s",
+            _nursery_lifecycle_error_code(error),
+        )
+        return None
+
+
+async def _bridge_anima_nursery_event_once(
+    xinchao_result: dict,
+    *,
+    source_key: str,
+    previous_references: list[dict] | None = None,
+) -> None:
+    """Apply exactly one completed child-safe Xinchao event, in order."""
+
+    source_type = _anima_nursery_source_type(source_key)
+    if (
+        source_type is None
+        or not isinstance(xinchao_result, dict)
+        or xinchao_result.get("status") != "applied"
+    ):
+        return
+    try:
+        event_id = int(xinchao_result.get("event_id") or 0)
+    except (TypeError, ValueError):
+        event_id = 0
+    if event_id <= 0:
+        logger.warning("Completed nursery source %s has no safe event id", source_key)
+        return
+    try:
+        exported = await asyncio.to_thread(
+            xinchao_service.child_safe_event_for_nursery, event_id
+        )
+    except Exception as error:
+        logger.warning(
+            "Nursery safe export failed for event %s: %s",
+            event_id,
+            _nursery_lifecycle_error_code(error),
+        )
+        return
+    event = _anima_nursery_safe_event(exported, source_key)
+    references = [
+        reference
+        for value in previous_references or []
+        if (reference := _anima_nursery_reference(value, source_key)) is not None
+    ]
+    if event is None and not references:
+        return
+    runtime = await _anima_nursery_runtime()
+    if runtime is None:
+        return
+    correction_failed = False
+    for reference in references:
+        try:
+            if event is None:
+                await asyncio.to_thread(
+                    runtime.revoke_anima_source,
+                    source_type=source_type,
+                    source_key=reference["source_key"],
+                    source_version=reference["source_version"],
+                )
+            elif reference["source_version"] != event["source_version"]:
+                await asyncio.to_thread(
+                    runtime.supersede_anima_source,
+                    source_type=source_type,
+                    source_key=reference["source_key"],
+                    source_version=reference["source_version"],
+                    superseded_by_source_version=event["source_version"],
+                )
+        except Exception as error:
+            if not _nursery_source_not_found(error):
+                logger.warning(
+                    "Nursery source lifecycle failed for %s: %s",
+                    reference["source_key"],
+                    _nursery_lifecycle_error_code(error),
+                )
+                correction_failed = True
+    if event is None:
+        return
+    if correction_failed:
+        # Do not make a replacement visible until every older safe version has
+        # been corrected; otherwise the child could retain both narratives.
+        return
+    try:
+        await runtime.apply_anima_family_event(event, source_type)
+    except Exception as error:
+        logger.warning(
+            "Nursery family event apply failed for event %s: %s",
+            event_id,
+            _nursery_lifecycle_error_code(error),
+        )
+
+
+async def _bridge_anima_nursery_event(
+    xinchao_result: dict,
+    *,
+    source_key: str,
+    previous_references: list[dict] | None = None,
+) -> None:
+    """Keep this optional sidecar from affecting any Brain write path."""
+
+    try:
+        await _bridge_anima_nursery_event_once(
+            xinchao_result,
+            source_key=source_key,
+            previous_references=previous_references,
+        )
+    except Exception as error:
+        logger.warning(
+            "Nursery lifecycle bridge failed for %s: %s",
+            source_key,
+            _nursery_lifecycle_error_code(error),
+        )
+
+
+async def _revoke_anima_nursery_events(source_key: str) -> None:
+    """Best-effort revoke of every previously exported safe source version."""
+
+    source_type = _anima_nursery_source_type(source_key)
+    if source_type is None:
+        return
+    try:
+        references = await _anima_nursery_references(source_key)
+        if not references:
+            return
+        runtime = await _anima_nursery_runtime()
+        if runtime is None:
+            return
+        for reference in references:
+            try:
+                await asyncio.to_thread(
+                    runtime.revoke_anima_source,
+                    source_type=source_type,
+                    source_key=reference["source_key"],
+                    source_version=reference["source_version"],
+                )
+            except Exception as error:
+                if not _nursery_source_not_found(error):
+                    logger.warning(
+                        "Nursery source revoke failed for %s: %s",
+                        reference["source_key"],
+                        _nursery_lifecycle_error_code(error),
+                    )
+    except Exception as error:
+        logger.warning(
+            "Nursery source revoke bridge failed for %s: %s",
+            source_key,
+            _nursery_lifecycle_error_code(error),
+        )
+
+
+async def _revoke_mailbox_nursery_events(message_id: int) -> None:
+    await _revoke_anima_nursery_events(f"mailbox:{int(message_id)}")
+
+
+async def _revoke_memory_nursery_events(bucket_id: str) -> None:
+    await _revoke_anima_nursery_events(f"memory:{str(bucket_id).strip()}")
+
+
+async def _revoke_expired_mailbox_nursery_events(message_ids: list[int]) -> None:
+    for message_id in message_ids:
+        await _revoke_mailbox_nursery_events(message_id)
+
+
+mailbox_store.set_expiry_listener(_revoke_expired_mailbox_nursery_events)
+
+
 async def _record_write_sidecars(
     content: str,
     source_tool: str,
@@ -1072,6 +1381,7 @@ async def _record_write_sidecars(
     *,
     task_content: str = "",
     correction_key: str = "",
+    previous_nursery_references: list[dict] | None = None,
 ) -> dict:
     """Update independent sidecars after a successful narrative write."""
     event_id = _write_sidecar_event_id(content, source_tool, source_ref)
@@ -1082,6 +1392,13 @@ async def _record_write_sidecars(
         external_event_id=event_id,
         correction_key=correction_key,
     )
+    source_key = _anima_nursery_source_key(source_tool, source_ref)
+    if source_key:
+        await _bridge_anima_nursery_event(
+            xinchao_result,
+            source_key=source_key,
+            previous_references=previous_nursery_references,
+        )
     correction = xinchao_result.get("correction") or {}
     correction_result = {"tasks": {}, "facts": {}}
     if correction.get("supersedes_event_id"):
@@ -1152,7 +1469,7 @@ async def _record_write_sidecars(
             }
         except Exception as error:
             logger.warning(
-                "Mind-lattice refresh failed after successful %s write: %s",
+                "LMC-5 refresh failed after successful %s write: %s",
                 source_tool,
                 error,
             )
@@ -1200,6 +1517,32 @@ mcp = FastMCP(
     host="0.0.0.0",
     port=8000,
 )
+
+# Private service-to-service routes only. The provider remains lazy, so a
+# missing deployment secret cannot create nursery storage during startup.
+nursery_internal_api = None
+if register_nursery_internal_routes is not None:
+    nursery_internal_api = register_nursery_internal_routes(mcp, config)
+    try:
+        nursery_runtime = nursery_internal_api.provider.get()
+        if nursery_runtime.store.ensure_personal_mcp_guardian():
+            logger.info("Personal Anima MCP guardian backfilled for existing nursery draft")
+        register_external_nursery_mcp_tools(
+            mcp,
+            tools=ExternalNurseryTools(
+                store=nursery_runtime.store,
+                creation=nursery_runtime.creation,
+                interaction=nursery_runtime.interaction,
+                body_time_rule=nursery_runtime.body_time_rule,
+            ),
+        )
+        logger.info("Nursery module tools enabled on Anima's existing MCP endpoint")
+    except NurseryError as error:
+        logger.warning("Nursery module tools remain unavailable: %s", error.code)
+else:
+    logger.warning(
+        "Nursery internal routes are disabled because nursery/ is not packaged"
+    )
 
 
 # =============================================================
@@ -1803,7 +2146,8 @@ async def breath(
                 else ""
             )
             results.append(
-                f"bucket_id: {bucket['id']}\n{distance_line}{summary}"
+                f"bucket_id: {bucket['id']}\n{distance_line}"
+                f"命中原因：{retrieval_reason(query, bucket)}\n{summary}"
                 f"{_render_related_buckets(related)}"
                 f"{timeline_text}"
             )
@@ -2130,6 +2474,7 @@ async def mailbox(
                     f"{format_message(current)}"
                 )
             deleted = await mailbox_store.delete(message_id)
+            await _revoke_mailbox_nursery_events(message_id)
             return _with_response_seal(
                 f"留言 #{message_id} 已删除，删除前原文已保存到历史快照。\n"
                 f"删除时间: {deleted['deleted_at']}"
@@ -2148,11 +2493,15 @@ async def mailbox(
                     f"原文:\n{current['message']}\n---\n拟修改为:\n{text}"
                 )
             updated = await mailbox_store.update(message_id, text)
+            previous_nursery_references = await _mailbox_nursery_references(
+                message_id
+            )
             await _record_write_sidecars(
                 text,
                 "mailbox",
                 str(message_id),
                 correction_key=f"mailbox:{message_id}",
+                previous_nursery_references=previous_nursery_references,
             )
             return _with_response_seal(
                 f"留言 #{message_id} 已修改，修改前原文已保存到历史快照。\n"
@@ -2224,12 +2573,18 @@ async def tasks(
     limit: int = 20,
     confirm: bool = False,
 ) -> str:
-    """tasks todo unfinished manage 搜索、新增、修改、完成或取消未竟事项;重要度1-5"""
+    """tasks todo unfinished manage 由当前AI主动新增、修改和维护未竟;重要度1-5"""
 
     def render(item: dict) -> str:
+        state_labels = {
+            "planned": "准备做",
+            "in_progress": "正在做",
+            "waiting": "等待中",
+            "completed": "已完成",
+        }
         lines = [
             f"task_id: {item['task_id']}",
-            f"状态: {item['status']}",
+            f"状态: {state_labels.get(item['status'], item['status'])}",
             f"重要程度: {item['importance']}（{_task_importance_label(item['importance'])}）",
             f"事项: {item['title']}",
         ]
@@ -2247,7 +2602,9 @@ async def tasks(
     normalized = str(action or "list").strip().lower()
     aliases = {
         "add": "create", "新增": "create", "搜索": "search", "查询": "list",
-        "修改": "update", "完成": "complete", "取消": "cancel",
+        "修改": "update", "准备做": "plan", "开始": "start",
+        "正在做": "start", "等待": "wait", "等待中": "wait",
+        "完成": "complete", "关闭": "complete", "取消": "complete",
         "重开": "reopen", "删除": "delete", "历史": "history",
     }
     normalized = aliases.get(normalized, normalized)
@@ -2260,7 +2617,7 @@ async def tasks(
             )
             return _with_response_seal("未竟事项已新增。\n" + render(item))
 
-        if normalized in {"update", "complete", "cancel", "reopen"}:
+        if normalized in {"update", "plan", "start", "wait", "complete", "cancel", "reopen"}:
             if task_id <= 0:
                 return _with_response_seal("请提供 task_id。")
             changes = {}
@@ -2277,7 +2634,8 @@ async def tasks(
                     return _with_response_seal("没有提供需要修改的字段。")
             else:
                 changes["status"] = {
-                    "complete": "completed", "cancel": "cancelled", "reopen": "open"
+                    "plan": "planned", "start": "in_progress", "wait": "waiting",
+                    "complete": "completed", "cancel": "completed", "reopen": "planned"
                 }[normalized]
             item = await task_service.update_manual(task_id, **changes)
             return _with_response_seal("未竟事项已更新。\n" + render(item))
@@ -2396,6 +2754,7 @@ async def trace(
                 await dehydrator.summary_cache.delete(bucket_id)
             except Exception as error:
                 logger.warning("Summary cache cleanup failed for %s: %s", bucket_id, error)
+            await _revoke_memory_nursery_events(bucket_id)
         return f"已遗忘记忆桶: {bucket_id}" if success else f"未找到记忆桶: {bucket_id}"
 
     bucket = await bucket_mgr.get(bucket_id)
@@ -2514,6 +2873,8 @@ async def trace(
             "trace_append",
             bucket_id,
         )
+    elif content and "content" in updates:
+        await _revoke_memory_nursery_events(bucket_id)
 
     changed_parts = []
     for key, value in updates.items():
@@ -2549,23 +2910,73 @@ async def trace(
 # Tool 6: pulse_boot — Compact startup context
 # 工具 6：pulse_boot — 开机专用上下文
 # =============================================================
-PULSE_BOOT_TOOL_GUIDE = """【工具】
-记忆：breath 搜索与浮现；recall 读取原文；calendar 按日期回看；timeline 查看事实变化；cabinet 查看主题目录。
-写入：hold 写入记忆；grow 归档或留信；mailbox 管理信箱；trace 修改记忆；split_bucket 拆分长记忆。
-内在：xinchao_status 查看 48 项内在状态与衰减；thought_trace 写入念痕；thought_trace_update 修改念痕；inner_state 查看心念与念痕；brain_context 查看跨模块联动；living_memory 查看单条记忆的心智经纬；self_state、disposition_preview、personality_preview 查看性格轨迹；continuity_review 查看连续性。
-事务：tasks 管理未竟；treasury 管理小金库；feedback 评价检索；digest_preview 预览整理；pulse 查看全库状态；heartbeat 报告当前在场；pulse_boot 可在新窗口重复读取开机摘要。"""
+PULSE_BOOT_TOOL_GUIDE = """【可用工具】
+记忆：breath、recall、calendar、timeline、cabinet；写入：hold、grow、mailbox、trace、split_bucket；
+内在：xinchao_status、thought_trace、thought_trace_update、inner_state、brain_context、living_memory、self_state、disposition_preview、personality_preview、continuity_review；
+事务：tasks、treasury、feedback、digest_preview、pulse、heartbeat、pulse_boot。需要时调用，不在开机摘要中展开说明。"""
+
+
+def _pulse_boot_continuity(mailbox_context: dict | None, state: dict) -> str:
+    """Describe elapsed real time without confusing it with AI-authored memory."""
+    anchor = str((mailbox_context or {}).get("created_at") or "").strip()
+    anchor_label = "上一窗口信箱"
+    if not anchor:
+        anchor = str(state.get("last_presence_at") or state.get("last_event_at") or "").strip()
+        anchor_label = "上次活动"
+    if not anchor:
+        return ""
+    try:
+        moment = datetime.fromisoformat(anchor.replace("Z", "+00:00"))
+        if moment.tzinfo is None:
+            moment = moment.replace(tzinfo=timezone(timedelta(hours=8)))
+        elapsed = max(0, int((beijing_now() - moment).total_seconds()))
+        return (
+            f"{anchor_label}：{moment.isoformat(timespec='minutes')}\n"
+            f"到这次醒来已经过：{xinchao_service.format_elapsed_zh(elapsed)}"
+        )
+    except (TypeError, ValueError):
+        return f"{anchor_label}：{anchor}"
+
+
+def _pulse_boot_current_state(state: dict) -> str:
+    """Render only the small state snapshot needed to resume naturally."""
+    if not state.get("available"):
+        return ""
+    relationship = state.get("relationship") or {}
+    expression = state.get("expression_state") or {}
+    lines = []
+    if relationship:
+        mode = "手动校准（只代表此刻）" if relationship.get("manual_override") else "自动判断"
+        lines.append(
+            f"关系：{relationship.get('label', '平稳相处')} "
+            f"{float(relationship.get('value', 100.0)):.1f}/200｜{mode}"
+        )
+    if expression:
+        lines.append(
+            f"此刻：{expression.get('name', state.get('dominant', '平稳'))} "
+            f"{float(expression.get('score', state.get('dominant_value', 0.0))):.2f}"
+        )
+    elif state.get("dominant"):
+        lines.append(
+            f"此刻：{state.get('dominant')} {float(state.get('dominant_value', 0.0)):.2f}"
+        )
+    if state.get("interaction_phase") == "absence":
+        lines.append(
+            "静默阶段：已进入｜静默后经过 "
+            + xinchao_service.format_elapsed_zh(int(state.get("elapsed_seconds", 0)))
+        )
+    return "\n".join(lines)
 
 
 @mcp.tool()
 async def pulse_boot() -> str:
-    """pulse_boot startup summary 开机摘要:核心目录、当前状态、最新交接与未竟数量"""
+    """pulse_boot startup handoff: continuity, core directory, mailbox and current state."""
     await history_retention_engine.ensure_started()
     settings = config.get("pulse_boot", {})
     session_id = _active_mcp_session_key()
     max_chars = max(1200, min(8000, int(settings.get("max_chars", 3600))))
     core_max_items = max(1, min(30, int(settings.get("core_max_items", 20))))
     first_bucket_id = str(settings.get("first_bucket_id", "")).strip()
-    thought_limit = max(1, min(20, int(settings.get("thought_limit", 8))))
     try:
         previous_boot = await xinchao_service.latest_boot_delivery()
     except Exception as error:
@@ -2573,83 +2984,34 @@ async def pulse_boot() -> str:
         previous_boot = None
     previous_boot_at = str((previous_boot or {}).get("delivered_at") or "")
     mailbox_context = await _pulse_boot_mailbox_context()
+    try:
+        recent_mailbox = await mailbox_store.list(limit=6, include_deleted=False)
+        recent_event_text = mailbox_continuity(recent_mailbox)
+    except Exception as error:
+        logger.warning("pulse_boot recent mailbox summary failed: %s", error)
+        recent_event_text = ""
     darkflow = None
     xinchao_state = {}
     try:
         xinchao_state = await xinchao_service.consume_boot(
             mailbox_context=mailbox_context
         )
-        xinchao_text = (
-            xinchao_service.render_compact(xinchao_state)
-            if xinchao_state.get("available")
-            else ""
-        )
         # A darkflow belongs to exactly one absence cycle. Falling back to a
         # previously-read slot can revive an old handoff and hide a newer mail.
         darkflow = xinchao_state.get("darkflow_item")
     except Exception as error:
         logger.warning("pulse_boot Xinchao handoff failed: %s", error)
-        xinchao_text = ""
-    try:
-        active_thoughts = await xinchao_service.list_private_thoughts(
-            status="active", limit=thought_limit
-        )
-        obsession_count = sum(
-            1 for item in active_thoughts if item.get("status") == "obsession"
-        )
-        flash_count = max(0, len(active_thoughts) - obsession_count)
-        thought_text = (
-            f"有 {len(active_thoughts)} 条心念（闪念 {flash_count}，执念 {obsession_count}）；"
-            "需要理解内在状态时再调用 inner_state。"
-            if active_thoughts
-            else ""
-        )
-    except Exception as error:
-        logger.warning("pulse_boot private thought read failed: %s", error)
-        thought_text = ""
-
-    task_completion_ids = []
-    try:
-        task_counts = await task_service.store.counts()
-        completed_tasks = await task_service.store.pending_completions(limit=20)
-        task_completion_ids = [int(item["task_id"]) for item in completed_tasks]
-        open_count = int(task_counts.get("open", 0))
-        task_text = (
-            f"有 {open_count} 件未完成；需要时调用 tasks 查看详情。"
-            if open_count > 0
-            else ""
-        )
-    except Exception as error:
-        logger.warning("pulse_boot task read failed: %s", error)
-        task_text = ""
-        task_completion_ids = []
-
     mailbox_text = await _pulse_boot_mailbox_section(mailbox_context)
     behavior_handoff_ids = []
     try:
         pending_behaviors = await behavior_service.store.list_pending_handoff(limit=30)
-        hidden_silence_ids = []
         cycle_behaviors = []
         for item in pending_behaviors:
-            context = item.get("context") or {}
-            phase = str(context.get("phase") or "")
-            legacy_silence = (
-                not phase
-                and int(context.get("event_count", 0)) == 0
-                and int(item.get("stage_index", 0))
-                in {1, behavior_service.SILENCE_NUDGE_STAGE}
-            )
-            if phase == "silence" or legacy_silence:
-                hidden_silence_ids.append(int(item["action_id"]))
-                continue
             cycle_behaviors.append(item)
-            if len(cycle_behaviors) >= 10:
-                break
-        if hidden_silence_ids:
-            await behavior_service.store.purge_handoff(hidden_silence_ids)
         behavior_handoff_ids = [int(item["action_id"]) for item in cycle_behaviors]
         behavior_text = "\n".join(
             f"- {item.get('delivered_at') or item['decided_at']}｜"
+            f"阶段：{(item.get('context') or {}).get('phase') or 'absence'}｜"
             f"已发送：{' '.join(str(item['content']).split())[:180]}"
             + (
                 f"｜用户已于 {item['acknowledged_at']} 点过“我看到了”"
@@ -2746,48 +3108,46 @@ async def pulse_boot() -> str:
             logger.warning("pulse_boot stale darkflow discard failed: %s", error)
         darkflow = None
 
-    handoff_parts = []
     has_darkflow = bool(darkflow and str(darkflow.get("content", "")).strip())
-    if has_darkflow:
-        handoff_parts.append(
-            f"【暗涌】\n{str(darkflow.get('content') or '').strip()}"
-        )
-        if mailbox_text:
-            handoff_parts.append("信箱另有最新留言，需要时调用 mailbox 自主读取。")
-    elif mailbox_text:
-        handoff_parts.append(f"【信箱最新留言】\n{mailbox_text}")
-    handoff_text = "\n\n".join(handoff_parts)
-
-    sections = [
-        "=== Clio 开机记忆 ===",
-        PULSE_BOOT_TOOL_GUIDE,
-    ]
+    sections = ["=== 醒来交付 ==="]
+    continuity_text = _pulse_boot_continuity(mailbox_context, xinchao_state)
+    if continuity_text:
+        sections.append(f"【时间连续性】\n{continuity_text}")
     if fixed_text:
         sections.append(
-            "【固定层：核心记忆目录】\n"
+            "【开机核心｜固定核心目录】\n"
             f"{fixed_text}"
         )
-    xinchao_text = _pulse_boot_hormone_summary(xinchao_text)
-    if xinchao_text:
-        sections.append(f"【激素】\n{xinchao_text}")
-    if thought_text:
-        sections.append(f"【心念】\n{thought_text}")
-    if handoff_text:
-        sections.append(handoff_text)
-    if latest_write_text:
-        sections.append(f"【新写入的记忆】\n{latest_write_text}")
+    if mailbox_text:
+        sections.append(f"【上一窗口信箱｜原文】\n{mailbox_text}")
+    if has_darkflow:
+        sections.append(
+            "【暗涌｜静默期机器生成】\n"
+            "这是信箱写完后，在静默期间根据事件与内在状态生成的后续变化，不是上一窗口亲写的信。\n"
+            f"{str(darkflow.get('content') or '').strip()}"
+        )
+    current_state_text = _pulse_boot_current_state(xinchao_state)
+    if current_state_text:
+        sections.append(f"【此刻｜系统状态快照】\n{current_state_text}")
+    if recent_event_text:
+        sections.append(f"【最近事件｜最近六封有效信箱】\n{recent_event_text}")
+    try:
+        awareness_text = self_awareness(await xinchao_service.disposition_preview(30))
+    except Exception as error:
+        logger.warning("pulse_boot self awareness failed: %s", error)
+        awareness_text = ""
+    if awareness_text:
+        sections.append(f"【自我觉察】\n{awareness_text}")
     if behavior_text:
         sections.append(
-            "【静默期间已发送】\n"
+            "【曾主动找过你｜仅本轮未交付记录】\n"
             f"{behavior_text}"
         )
-    if task_text:
-        sections.append(f"【未竟】\n{task_text}")
     body = "\n\n".join(sections)
     if len(body) > max_chars:
         suffix = "\n\n【开机资料已达到固定上限，其余记忆请按需使用 recall 深读。】"
         body = body[: max(1, max_chars - len(suffix))].rstrip() + suffix
-    if darkflow and "【暗涌】" in body:
+    if darkflow and "【暗涌｜静默期机器生成】" in body:
         try:
             await xinchao_service.mark_darkflow_delivered(
                 int(darkflow["cycle_id"])
@@ -2799,11 +3159,6 @@ async def pulse_boot() -> str:
             await behavior_service.store.purge_handoff(behavior_handoff_ids)
         except Exception as error:
             logger.warning("pulse_boot behavior handoff purge failed: %s", error)
-    if task_completion_ids and "新完成" in body:
-        try:
-            await task_service.store.mark_completions_delivered(task_completion_ids)
-        except Exception as error:
-            logger.warning("pulse_boot task completion handoff failed: %s", error)
     try:
         await xinchao_service.observe_presence(
             session_id=session_id,
@@ -2955,7 +3310,7 @@ async def thought_trace_update(
 
 @mcp.tool()
 async def inner_state() -> str:
-    """inner_state thoughts resonance tension inspect 查看当前心念、记忆共振与内在张力;只读不清空"""
+    """inner_state thoughts resonance tension inspect 查看当前心念、记忆回响与内在牵引;只读不清空"""
     try:
         state = await xinchao_service.status()
         thoughts = await xinchao_service.list_private_thoughts(
@@ -3002,7 +3357,7 @@ async def inner_state() -> str:
             source = str(item.get("name") or item.get("bucket_id") or "记忆")
         resonance_lines.append(f"- [{source}｜{score:.2f}] {excerpt}")
     if resonance_lines:
-        sections.append("【记忆共振】\n" + "\n".join(resonance_lines))
+        sections.append("【记忆回响】\n" + "\n".join(resonance_lines))
 
     pipes = state.get("pipes") or {}
     if pipes:
@@ -3028,7 +3383,7 @@ async def inner_state() -> str:
             "收束: " + "｜".join(f"{name} {value:.2f}" for name, value in restraints),
             f"张力差: {strongest[1] - counterweight[1]:+.2f}",
         ]
-        sections.append("【张力】\n" + "\n".join(line for line in tension_lines if line))
+        sections.append("【内在牵引】\n" + "\n".join(line for line in tension_lines if line))
 
     sections.append("仅供理解当前状态；本次读取不会清空、消耗或修改任何内容。")
     return _with_response_seal("\n\n".join(sections))
@@ -4016,35 +4371,68 @@ async def treasury(
 
 
 # --- Entry point / 启动入口 ---
+async def _xinchao_settlement_tick() -> dict:
+    """Run one bounded darkflow/push settlement pass.
+
+    This deliberately uses the lightweight mailbox reader.  A full semantic
+    mailbox search belongs to pulse_boot and must not block the background
+    timer that opens silence, creates a push decision, and advances darkflow.
+    """
+    mailbox_context = await _settlement_mailbox_context()
+    settled = await xinchao_service.settle_darkflow(
+        mailbox_context=mailbox_context
+    )
+    darkflow = await xinchao_service.pending_darkflow()
+    state = await xinchao_service.status()
+    if state.get("interaction_phase") != "absence":
+        return {
+            "phase": state.get("interaction_phase", "active"),
+            "settled": settled,
+            "nudge": None,
+            "due": [],
+        }
+    nudge = await behavior_service.process_silence_nudge(state)
+    due = await behavior_service.process_due(
+        state, mailbox_context, darkflow
+    )
+    return {
+        "phase": "absence",
+        "settled": settled,
+        "nudge": nudge,
+        "due": due,
+    }
+
+
 async def _xinchao_settlement_loop() -> None:
     interval = max(
         30,
         min(600, int(config.get("xinchao", {}).get("settle_interval_seconds", 60))),
     )
+    timeout = max(
+        30,
+        min(
+            300,
+            int(config.get("xinchao", {}).get("settle_timeout_seconds", 120)),
+        ),
+    )
+    logger.info(
+        "Xinchao background settlement started: interval=%ss timeout=%ss "
+        "mailbox_mode=latest_only",
+        interval,
+        timeout,
+    )
     await asyncio.sleep(min(15, interval))
     while True:
         try:
-            mailbox_context = await _pulse_boot_mailbox_context()
-            state = await xinchao_service.status()
-            settled = await xinchao_service.settle_darkflow(
-                mailbox_context=mailbox_context
+            await asyncio.wait_for(
+                _xinchao_settlement_tick(), timeout=timeout
             )
-            darkflow = await xinchao_service.pending_darkflow()
-            state = await xinchao_service.status()
-            if state.get("interaction_phase") != "absence":
-                darkflow = None
-                due_results = []
-            else:
-                await behavior_service.process_silence_nudge(state)
-                due_results = await behavior_service.process_due(
-                    state, mailbox_context, darkflow
-                )
-            already_sent = any(
-                item.get("status") in {"sent", "rehearsal"}
-                for item in due_results
+        except asyncio.TimeoutError:
+            logger.warning(
+                "Xinchao background settlement timed out after %ss; "
+                "the next pass will retry",
+                timeout,
             )
-            if not already_sent:
-                await behavior_service.process(darkflow, state, mailbox_context)
         except asyncio.CancelledError:
             raise
         except Exception as error:
@@ -4068,6 +4456,28 @@ async def _task_retention_loop() -> None:
         except Exception as error:
             logger.warning("Completed task retention failed: %s", error)
         await asyncio.sleep(interval)
+
+
+async def _nursery_short_event_retention_loop() -> None:
+    """Permanently delete child dialogue and temporary state after thirty days."""
+
+    if nursery_internal_api is None:
+        return
+    while True:
+        try:
+            runtime = await asyncio.to_thread(nursery_internal_api.provider.get)
+            result = await asyncio.to_thread(
+                runtime.store.purge_expired_child_short_events
+            )
+            if result["deleted_events"] or result["reset_states"]:
+                logger.info("Nursery short-event retention: %s", result)
+        except NurseryError as error:
+            if error.code == "NURSERY_SERVICE_NOT_CONFIGURED":
+                return
+            logger.warning("Nursery short-event retention failed: %s", error.code)
+        except Exception as error:
+            logger.warning("Nursery short-event retention failed: %s", error)
+        await asyncio.sleep(3600)
 
 
 if __name__ == "__main__":
@@ -4125,18 +4535,24 @@ if __name__ == "__main__":
                     bucket_mgr.embedding_index.worker_loop()
                 )
                 task_retention_task = asyncio.create_task(_task_retention_loop())
+                nursery_retention_task = asyncio.create_task(
+                    _nursery_short_event_retention_loop()
+                )
                 try:
                     yield
                 finally:
                     settlement_task.cancel()
                     embedding_task.cancel()
                     task_retention_task.cancel()
+                    nursery_retention_task.cancel()
                     with suppress(asyncio.CancelledError):
                         await settlement_task
                     with suppress(asyncio.CancelledError):
                         await embedding_task
                     with suppress(asyncio.CancelledError):
                         await task_retention_task
+                    with suppress(asyncio.CancelledError):
+                        await nursery_retention_task
 
         _app.router.lifespan_context = _combined_lifespan
         _app.add_middleware(

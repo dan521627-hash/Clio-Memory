@@ -7,6 +7,7 @@ import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import server
+from sqlite_utils import ClosingConnection
 from dehydrator import Dehydrator
 from summary_cache import SummaryCache
 
@@ -115,7 +116,9 @@ class SummaryCacheTests(unittest.IsolatedAsyncioTestCase):
     async def test_cache_schema_has_hash_and_summary_but_no_full_source_column(self):
         with tempfile.TemporaryDirectory() as root:
             store = SummaryCache(config_for(root))
-            with sqlite3.connect(store.db_path) as connection:
+            with sqlite3.connect(
+                store.db_path, factory=ClosingConnection
+            ) as connection:
                 columns = {
                     row[1]
                     for row in connection.execute("PRAGMA table_info(summary_cache)")

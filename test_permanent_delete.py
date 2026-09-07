@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock
 
 from bucket_manager import BucketManager
 from permanent_delete import PermanentDeleteService
+from sqlite_utils import ClosingConnection
 
 
 class PermanentDeleteServiceTests(unittest.TestCase):
@@ -32,7 +33,9 @@ class PermanentDeleteServiceTests(unittest.TestCase):
         self.temp.cleanup()
 
     def _database(self, name: str, statements: list[str], inserts: list[tuple[str, tuple]]):
-        with sqlite3.connect(self.root / name) as connection:
+        with sqlite3.connect(
+            self.root / name, factory=ClosingConnection
+        ) as connection:
             for statement in statements:
                 connection.execute(statement)
             for statement, values in inserts:
@@ -92,9 +95,13 @@ class PermanentDeleteServiceTests(unittest.TestCase):
         self.assertEqual(removed["emotion_events"], 1)
         self.assertEqual(removed["darkflow_context"], 1)
 
-        with sqlite3.connect(self.root / "history.sqlite3") as connection:
+        with sqlite3.connect(
+            self.root / "history.sqlite3", factory=ClosingConnection
+        ) as connection:
             self.assertEqual(connection.execute("SELECT bucket_id FROM bucket_history").fetchall(), [(self.other,)])
-        with sqlite3.connect(self.root / "relations.sqlite3") as connection:
+        with sqlite3.connect(
+            self.root / "relations.sqlite3", factory=ClosingConnection
+        ) as connection:
             self.assertEqual(connection.execute("SELECT * FROM relations").fetchall(), [("aaa", "bbb")])
 
 

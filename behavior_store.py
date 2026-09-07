@@ -275,7 +275,12 @@ class BehaviorStore:
         return [self._decode(row) for row in rows]
 
     async def list_pending_handoff(self, limit: int = 10) -> list[dict]:
-        """Return plaintext Bark messages that have not yet been handed off."""
+        """Return pushes awaiting the next successful AI handoff.
+
+        Acknowledged pushes stay in this queue until ``pulse_boot`` consumes
+        them, so the AI can see what it sent and whether it was acknowledged.
+        The manager-facing summary applies the separate unread filter.
+        """
         return await asyncio.to_thread(self._list_pending_handoff_sync, limit)
 
     @staticmethod
@@ -528,12 +533,13 @@ class BehaviorStore:
                     f"WHERE candidate_id IN ({candidate_placeholders})",
                     candidate_ids,
                 )
-        with self._connect() as connection:
-            connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        # This is intentionally delayed until pulse_boot has included the
+        # records in its returned summary.  Before that point, the records are
+        # the only continuity available to a later push decision.
         return int(cursor.rowcount)
 
     async def purge_handoff(self, action_ids: list[int]) -> int:
-        """Hard-delete handed-off Bark plaintext; no snapshot is created."""
+        """Delete push records after a successful AI handoff."""
         return await asyncio.to_thread(self._purge_handoff_sync, action_ids)
 
     def _purge_cycle_candidates_sync(self, cycle_ids: list[int]) -> int:
@@ -605,21 +611,18 @@ class BehaviorStore:
                   AND handoff_status IN ('none', 'legacy', 'pending')
                 """
             )
-            handoff_cursor = connection.execute(
-                """
-                UPDATE behavior_actions SET handoff_status='cancelled'
-                WHERE status='sent' AND handoff_status='pending'
-                """
-            )
         return {
             "candidates": int(candidate_cursor.rowcount),
             "unsent_actions": int(unsent_cursor.rowcount),
-            "pending_handoffs": int(handoff_cursor.rowcount),
+            # A delivered push belongs to the user until they acknowledge it.
+            # New activity may reset the next silence cycle, but must never
+            # erase an already delivered acknowledgement prompt.
+            "pending_handoffs": 0,
             "cycle_id": int(current_cycle_id or 0),
         }
 
     async def cancel_for_activity(self, current_cycle_id: int) -> dict:
-        """Cancel queued output and stop sent pushes from entering the next handoff."""
+        """Cancel queued output while preserving delivered acknowledgement prompts."""
         return await asyncio.to_thread(
             self._cancel_for_activity_sync, current_cycle_id
         )
@@ -647,15 +650,45 @@ class BehaviorStore:
         with self._connect() as connection:
             row = connection.execute(
                 "SELECT * FROM behavior_candidates "
-                "WHERE cycle_id=? AND source_event_id=? "
+                "WHERE cycle_id=? AND status IN ('pending', 'waiting') "
                 "ORDER BY candidate_id DESC LIMIT 1",
-                (int(cycle_id), -abs(int(cycle_id))),
+                (int(cycle_id),),
             ).fetchone()
         return self._decode_candidate(row)
 
     async def candidate_for_cycle(self, cycle_id: int) -> dict | None:
-        """Return the one silence-entry decision belonging to this cycle."""
+        """Return the currently open silence-entry decision for this cycle."""
         return await asyncio.to_thread(self._candidate_for_cycle_sync, cycle_id)
+
+    def _silence_progress_sync(self, cycle_id: int, limit: int = 8) -> dict:
+        """Return closed attempts and delivered pushes without touching state."""
+        safe_limit = max(1, min(30, int(limit)))
+        with self._connect() as connection:
+            latest_candidate = connection.execute(
+                "SELECT * FROM behavior_candidates WHERE cycle_id=? "
+                "ORDER BY candidate_id DESC LIMIT 1",
+                (int(cycle_id),),
+            ).fetchone()
+            candidate_count = connection.execute(
+                "SELECT COUNT(*) FROM behavior_candidates WHERE cycle_id=?",
+                (int(cycle_id),),
+            ).fetchone()[0]
+            action_rows = connection.execute(
+                "SELECT * FROM behavior_actions WHERE cycle_id=? AND status='sent' "
+                "ORDER BY action_id DESC LIMIT ?",
+                (int(cycle_id), safe_limit),
+            ).fetchall()
+        return {
+            "latest_candidate": self._decode_candidate(latest_candidate),
+            "candidate_count": int(candidate_count),
+            "push_history": [self._decode(row) for row in reversed(action_rows)],
+        }
+
+    async def silence_progress(self, cycle_id: int, limit: int = 8) -> dict:
+        """Read repeat-push progress for one silence cycle."""
+        return await asyncio.to_thread(
+            self._silence_progress_sync, cycle_id, limit
+        )
 
     def _upsert_candidate_sync(self, payload: dict) -> dict:
         stamp = now_iso()

@@ -477,6 +477,151 @@ class MailboxManagerApiTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(len(history["items"]), 2)
 
+    async def test_nursery_lifecycle_uses_safe_private_payloads_and_never_breaks_mailbox(self):
+        item = await self.store.add("原始成人信箱正文，不能越过安全边界。")
+        previous = [{"source_key": "mailbox:1", "source_version": "old#1"}]
+        safe_event = {
+            "source_key": "mailbox:1",
+            "source_version": "new#2",
+            "category": "relationship",
+            "child_safe_summary": "家里用温和方式把事情说开了。",
+            "occurred_at": "2026-09-03T00:00:00+00:00",
+        }
+        post = AsyncMock(return_value="")
+        with (
+            patch.object(manager_server, "_post_nursery_lifecycle", new=post),
+            patch.object(
+                manager_server.xinchao_service,
+                "child_safe_event_for_nursery",
+                return_value=safe_event,
+            ),
+            patch.object(
+                manager_server.xinchao_service,
+                "child_safe_source_references_for_nursery",
+                return_value=[],
+            ),
+        ):
+            await manager_server._bridge_anima_nursery_event(
+                {"status": "applied", "event_id": 2, "created_at": "new"},
+                source_key="mailbox:1",
+                previous_references=previous,
+            )
+
+        self.assertEqual(post.await_count, 2)
+        supersede = post.await_args_list[0].args
+        apply = post.await_args_list[1].args
+        self.assertEqual(
+            supersede[0], "/internal/nursery/anima/family-events/supersede"
+        )
+        self.assertEqual(
+            apply[0], "/internal/nursery/anima/family-events"
+        )
+        serialized = repr([supersede[1], apply[1]])
+        self.assertNotIn("成人信箱正文", serialized)
+        self.assertNotIn("child_id", serialized)
+        self.assertNotIn("actor", serialized)
+
+        post.reset_mock()
+        await manager_server._bridge_anima_nursery_event(
+            {"status": "pending", "event_id": 3},
+            source_key="mailbox:1",
+            previous_references=previous,
+        )
+        post.assert_not_awaited()
+
+        post.reset_mock()
+        with patch.object(
+            manager_server,
+            "_post_nursery_lifecycle",
+            new=post,
+        ), patch.object(
+            manager_server.xinchao_service,
+            "child_safe_event_for_nursery",
+            return_value=None,
+        ):
+            await manager_server._bridge_anima_nursery_event(
+                {"status": "applied", "event_id": 3, "created_at": "newer"},
+                source_key="mailbox:1",
+                previous_references=previous,
+            )
+        self.assertEqual(post.await_args.args[0], "/internal/nursery/anima/family-events/revoke")
+
+        with patch.object(
+            manager_server,
+            "_post_nursery_lifecycle",
+            new=AsyncMock(side_effect=RuntimeError("nursery offline")),
+        ), patch.object(
+            manager_server.xinchao_service,
+            "child_safe_source_references_for_nursery",
+            return_value=[],
+        ), patch.object(
+            manager_server.xinchao_service,
+            "child_safe_event_for_nursery",
+            return_value=None,
+        ), patch.object(
+            manager_server,
+            "_record_sidecars",
+            new=AsyncMock(),
+        ):
+            updated = await manager_server.update_mailbox_message(
+                item["message_id"], MailboxUpdate(message="修改后仍须保存")
+            )
+            deleted = await manager_server.delete_mailbox_message(
+                item["message_id"],
+                MailboxDeleteRequest(confirm_message_id=item["message_id"]),
+            )
+        self.assertEqual(updated["item"]["message"], "修改后仍须保存")
+        self.assertIsNotNone(deleted["item"]["deleted_at"])
+
+    async def test_expiry_listener_failure_never_reverses_expiry(self):
+        first = await self.store.add(
+            "过期邮件", created_at="2026-08-01T08:00:00+08:00"
+        )
+        await self.store.add("保留最新邮件", created_at="2026-08-02T08:00:00+08:00")
+        self.store.retention_days = 1
+        self.store.set_expiry_listener(
+            AsyncMock(side_effect=RuntimeError("nursery unavailable"))
+        )
+        expired = await self.store.expire_old_messages(
+            datetime(2026, 9, 3, tzinfo=timezone.utc)
+        )
+        deleted = await self.store.get(first["message_id"], include_deleted=True)
+        self.assertEqual(expired, [first["message_id"]])
+        self.assertIsNotNone(deleted["deleted_at"])
+
+    async def test_memory_lifecycle_uses_only_safe_envelope(self):
+        previous = [{"source_key": "memory:bucket-1", "source_version": "old#1"}]
+        safe_event = {
+            "source_key": "memory:bucket-1",
+            "source_version": "new#2",
+            "category": "family",
+            "child_safe_summary": "家里平静地完成了一件小事。",
+            "occurred_at": "2026-09-03T00:00:00+00:00",
+        }
+        post = AsyncMock(return_value="")
+        with (
+            patch.object(manager_server, "_post_nursery_lifecycle", new=post),
+            patch.object(
+                manager_server.xinchao_service,
+                "child_safe_event_for_nursery",
+                return_value=safe_event,
+            ),
+        ):
+            await manager_server._bridge_anima_nursery_event(
+                {"status": "applied", "event_id": 2, "created_at": "new"},
+                source_key="memory:bucket-1",
+                previous_references=previous,
+            )
+        self.assertEqual(
+            [call.args[0] for call in post.await_args_list],
+            [
+                "/internal/nursery/anima/family-events/supersede",
+                "/internal/nursery/anima/family-events",
+            ],
+        )
+        self.assertNotIn("child_id", repr(post.await_args_list))
+        self.assertNotIn("actor", repr(post.await_args_list))
+
 
 if __name__ == "__main__":
     unittest.main()

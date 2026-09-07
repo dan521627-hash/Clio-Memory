@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 import sqlite3
@@ -7,12 +8,12 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import server
 from utils import BEIJING_TIMEZONE
 from xinchao_engine import XinchaoEngine, empty_pipes
-from xinchao_store import XinchaoService
+from xinchao_store import XinchaoService, _ClosingConnection
 
 
 class FakeEvaluator:
@@ -152,6 +153,41 @@ class TraceEffectEvaluator(FakeEvaluator):
         return {"pipes": {"想靠近": 0.22, "开心": 0.08}, "text": "不得写回正文"}
 
 
+class MemoryEchoEvaluator(FakeEvaluator):
+    async def evaluate_trace_effect(self, content):
+        return {"pipes": {"想靠近": 0.4, "满足": 0.4}}
+
+
+class RelationshipEvaluator(FakeEvaluator):
+    async def evaluate(self, content):
+        if "无关" in content:
+            deltas = {"专注": 0.2}
+        elif "吵架" in content:
+            deltas = {"生气": 0.38, "委屈": 0.28, "想暂时独处": 0.24}
+        else:
+            deltas = {"安心": 0.35, "开心": 0.28, "想靠近": 0.22}
+        return {
+            "event": content,
+            "event_tag": content,
+            "context_card": content,
+            "severity": 0.6,
+            "pipes": deltas,
+            "narrative_complete": True,
+            "handoff_ready": False,
+            "quality_note": "",
+        }
+
+
+class ChildSafeEvaluator(FakeEvaluator):
+    async def evaluate(self, content):
+        result = await super().evaluate(content)
+        result["child_safe_update"] = {
+            "category": "routine",
+            "summary": "今天的作息有一点变化，可以慢慢适应。",
+        }
+        return result
+
+
 def config(root, **overrides):
     settings = {
         "enabled": True,
@@ -186,7 +222,7 @@ class XinchaoEngineTests(unittest.TestCase):
         )
         self.assertIn("signals", parsed)
 
-    def test_evaluator_uses_safe_token_budget_for_full_evidence_schema(self):
+    def test_evaluator_uses_dehydration_token_budget_when_not_overridden(self):
         from xinchao_evaluator import XinchaoEvaluator
 
         evaluator = XinchaoEvaluator(
@@ -196,6 +232,58 @@ class XinchaoEngineTests(unittest.TestCase):
             }
         )
         self.assertEqual(evaluator.max_tokens, 2048)
+
+    def test_child_safe_update_rejects_verbatim_or_sensitive_text(self):
+        from xinchao_evaluator import XinchaoEvaluator
+
+        self.assertEqual(
+            XinchaoEvaluator._safe_child_safe_update(
+                {"category": "routine", "summary": "今天的作息有一点变化，可以慢慢适应。"},
+                "原文是完全不同的一段成人记录。",
+            ),
+            {"category": "routine", "summary": "今天的作息有一点变化，可以慢慢适应。"},
+        )
+        self.assertIsNone(
+            XinchaoEvaluator._safe_child_safe_update(
+                {"category": "routine", "summary": "今天的作息有一点变化，可以慢慢适应。"},
+                "今天的作息有一点变化，可以慢慢适应。",
+            )
+        )
+        self.assertIsNone(
+            XinchaoEvaluator._safe_child_safe_update(
+                {"category": "care", "summary": "请记住她的住址。"}, "不同原文"
+            )
+        )
+
+    def test_trace_signal_validation_keeps_two_directly_supported_subtle_states(self):
+        from xinchao_evaluator import XinchaoEvaluator
+
+        content = "我想把她哄高兴，又反复想自己刚才哪里没做好。"
+        signals = XinchaoEvaluator._safe_signals(
+            [
+                {
+                    "subject": "ai",
+                    "scope": "current",
+                    "state": "想让她开心",
+                    "delta": 0.16,
+                    "evidence": "想把她哄高兴",
+                    "confidence": 0.58,
+                    "reason": "明确希望对方开心",
+                },
+                {
+                    "subject": "ai",
+                    "scope": "current",
+                    "state": "复盘",
+                    "delta": 0.14,
+                    "evidence": "反复想自己刚才哪里没做好",
+                    "confidence": 0.56,
+                    "reason": "在回想并改进自己的表达",
+                },
+            ],
+            content,
+            confidence_floor=0.52,
+        )
+        self.assertEqual([item["state"] for item in signals], ["想让她开心", "复盘"])
 
     def test_private_judge_config_is_filtered_and_changes_prompt_hash(self):
         from xinchao_evaluator import XinchaoEvaluator
@@ -358,7 +446,7 @@ class XinchaoEngineTests(unittest.TestCase):
                     executor.map(lambda _: XinchaoService(config(root)), range(4))
                 )
             self.assertEqual(len(services), 4)
-            with sqlite3.connect(services[0].db_path) as connection:
+            with sqlite3.connect(services[0].db_path, factory=_ClosingConnection) as connection:
                 columns = [
                     row[1]
                     for row in connection.execute(
@@ -369,6 +457,38 @@ class XinchaoEngineTests(unittest.TestCase):
 
 
 class XinchaoServiceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_relationship_scale_manual_override_is_current_only(self):
+        with tempfile.TemporaryDirectory() as root:
+            service = XinchaoService(config(root))
+            service.evaluator = RelationshipEvaluator()
+            await service.record_event("我们和好了，也愿意靠近。", "mailbox", "warm")
+            automatic = await service.relationship_status()
+            manual = await service.set_relationship_override(60, "此刻不想说话")
+            await service.record_event("这次写入与关系无关。", "mailbox", "neutral")
+            still_manual = await service.relationship_status()
+            await service.record_event("我们刚刚吵架了。", "mailbox", "conflict")
+            released = await service.relationship_status()
+
+        self.assertGreater(automatic["automatic_value"], 100)
+        self.assertEqual(manual["mode"], "manual_current")
+        self.assertEqual(manual["effective_value"], 60)
+        self.assertEqual(still_manual["effective_value"], 60)
+        self.assertEqual(released["mode"], "automatic")
+        self.assertIsNone(released["manual_value"])
+        self.assertIn("吵架", released["source_summary"])
+
+    async def test_relationship_scale_can_restore_automatic_judgement(self):
+        with tempfile.TemporaryDirectory() as root:
+            service = XinchaoService(config(root))
+            service.evaluator = RelationshipEvaluator()
+            await service.record_event("我们和好了。", "mailbox", "warm")
+            automatic = await service.relationship_status()
+            await service.set_relationship_override(175, "此刻很亲密")
+            restored = await service.restore_relationship_auto()
+
+        self.assertEqual(restored["mode"], "automatic")
+        self.assertEqual(restored["effective_value"], automatic["automatic_value"])
+
     async def test_ordinary_write_updates_hormones_without_starting_static(self):
         with tempfile.TemporaryDirectory() as root:
             service = XinchaoService(
@@ -395,11 +515,11 @@ class XinchaoServiceTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as root:
             service = XinchaoService(config(root, monologue_enabled=True))
             service.evaluator = FakeEvaluator(handoff_ready=False)
-            await service.record_event("写下一件需要等待的事。", "hold", "a")
+            await service.record_event("写下一件需要等待的事。", "mailbox", "a")
             old_stamp = (
                 datetime.now(BEIJING_TIMEZONE) - timedelta(minutes=31)
             ).isoformat(timespec="seconds")
-            with sqlite3.connect(service.db_path) as connection:
+            with sqlite3.connect(service.db_path, factory=_ClosingConnection) as connection:
                 connection.execute(
                     "UPDATE xinchao_state SET last_event_at=?, last_presence_at=? "
                     "WHERE state_id=1",
@@ -429,11 +549,11 @@ class XinchaoServiceTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as root:
             service = XinchaoService(config(root, monologue_enabled=True))
             service.evaluator = FakeEvaluator(handoff_ready=False)
-            await service.record_event("写下一件完整的事和当时感受。", "hold", "old")
+            await service.record_event("写下一件完整的事和当时感受。", "mailbox", "old")
             old_stamp = (
                 datetime.now(BEIJING_TIMEZONE) - timedelta(minutes=91)
             ).isoformat(timespec="seconds")
-            with sqlite3.connect(service.db_path) as connection:
+            with sqlite3.connect(service.db_path, factory=_ClosingConnection) as connection:
                 connection.execute(
                     "UPDATE xinchao_state SET last_event_at=?, last_presence_at=? "
                     "WHERE state_id=1",
@@ -467,11 +587,11 @@ class XinchaoServiceTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as root:
             service = XinchaoService(config(root, monologue_enabled=True))
             service.evaluator = FakeEvaluator(handoff_ready=False)
-            event = await service.record_event("写下一件完整的事和感受。", "hold", "a")
+            event = await service.record_event("写下一件完整的事和感受。", "mailbox", "a")
             old_stamp = (
                 datetime.now(BEIJING_TIMEZONE) - timedelta(minutes=91)
             ).isoformat(timespec="seconds")
-            with sqlite3.connect(service.db_path) as connection:
+            with sqlite3.connect(service.db_path, factory=_ClosingConnection) as connection:
                 connection.execute(
                     "UPDATE xinchao_state SET last_event_at=?, last_presence_at=? "
                     "WHERE state_id=1",
@@ -502,6 +622,46 @@ class XinchaoServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(state["static_ready"])
         self.assertEqual(state["interaction_phase"], "active")
         self.assertEqual(state["silence_to_absence_seconds"], 1800)
+
+    async def test_post_mailbox_activity_keeps_mailbox_cycle_until_real_silence(self):
+        with tempfile.TemporaryDirectory() as root:
+            service = XinchaoService(config(root, monologue_enabled=True))
+            service.evaluator = FakeEvaluator(tag="窗口收尾", handoff_ready=True)
+            recorded = await service.record_event(
+                "这一轮聊完了，我把事情和感受写进信箱。",
+                "mailbox",
+                "handoff",
+            )
+            before = await service.status()
+            observed = await service.observe_presence(
+                session_id="session-a",
+                source="mcp:mailbox",
+                event_id="request-a",
+                interrupt_silence=True,
+            )
+            active = await service.status()
+            old_stamp = (
+                datetime.now(BEIJING_TIMEZONE) - timedelta(minutes=91)
+            ).isoformat(timespec="seconds")
+            with sqlite3.connect(service.db_path, factory=_ClosingConnection) as connection:
+                connection.execute(
+                    "UPDATE xinchao_state SET last_event_at=?, last_presence_at=? "
+                    "WHERE state_id=1",
+                    (old_stamp, old_stamp),
+                )
+            generated = await service.settle_darkflow(
+                mailbox_context={
+                    "message_id": 77,
+                    "created_at": old_stamp,
+                    "message": "这一轮聊完了，我把事情和感受写进信箱。",
+                }
+            )
+
+        self.assertEqual(observed["cycle_id"], recorded["cycle_id"])
+        self.assertFalse(observed["new_cycle_started"])
+        self.assertEqual(active["cycle_id"], before["cycle_id"])
+        self.assertTrue(active["silence_eligible"])
+        self.assertEqual(generated["status"], "updated")
 
     async def test_heartbeat_does_not_open_cycle_or_generate_darkflow(self):
         with tempfile.TemporaryDirectory() as root:
@@ -534,7 +694,7 @@ class XinchaoServiceTests(unittest.IsolatedAsyncioTestCase):
                 }
             )
             darkflow = await service.pending_darkflow()
-            with sqlite3.connect(service.db_path) as connection:
+            with sqlite3.connect(service.db_path, factory=_ClosingConnection) as connection:
                 event_count = connection.execute(
                     "SELECT COUNT(*) FROM xinchao_events"
                 ).fetchone()[0]
@@ -589,7 +749,7 @@ class XinchaoServiceTests(unittest.IsolatedAsyncioTestCase):
             )
             traces = await service.list_private_thoughts("all", kind="trace")
             found = await service.search_private_thoughts("不体面的想法", kind="trace")
-            with sqlite3.connect(service.db_path) as connection:
+            with sqlite3.connect(service.db_path, factory=_ClosingConnection) as connection:
                 event_count = connection.execute(
                     "SELECT COUNT(*) FROM xinchao_events"
                 ).fetchone()[0]
@@ -619,6 +779,29 @@ class XinchaoServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["deltas"], {"难过": 0.3})
         self.assertEqual(evaluator.trace_inputs, [])
 
+    async def test_duplicate_mailbox_and_trace_keep_the_earliest_emotional_linkage(self):
+        with tempfile.TemporaryDirectory() as root:
+            service = XinchaoService(config(root))
+            service.evaluator = FakeEvaluator()
+            content = "我想把她哄高兴，又反复想自己刚才哪里没做好。"
+            first = await service.record_event(content, "mailbox", "mail-1")
+            later_trace = await service.record_thought_trace(
+                content,
+                tag="同一段想法",
+                deltas={"想让她开心": 0.2, "复盘": 0.15},
+            )
+            later_mailbox = await service.record_event(
+                content,
+                "mailbox",
+                "mail-2",
+            )
+
+        self.assertEqual(first["status"], "applied")
+        self.assertEqual(later_trace["status"], "recorded")
+        self.assertTrue(later_trace["linkage_deduplicated"])
+        self.assertEqual(later_trace["deltas"], {})
+        self.assertEqual(later_mailbox["status"], "duplicate")
+
     async def test_current_ai_can_update_trace_and_revision_is_kept(self):
         with tempfile.TemporaryDirectory() as root:
             service = XinchaoService(config(root))
@@ -637,7 +820,7 @@ class XinchaoServiceTests(unittest.IsolatedAsyncioTestCase):
                 source_ref="session-2",
             )
             traces = await service.list_private_thoughts("all", kind="trace")
-            with sqlite3.connect(service.db_path) as connection:
+            with sqlite3.connect(service.db_path, factory=_ClosingConnection) as connection:
                 revisions = connection.execute(
                     "SELECT old_text, new_text FROM xinchao_trace_revisions"
                 ).fetchall()
@@ -673,7 +856,7 @@ class XinchaoServiceTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as root:
             service = XinchaoService(config(root))
             now = datetime.now(BEIJING_TIMEZONE).isoformat(timespec="seconds")
-            with sqlite3.connect(service.db_path) as connection:
+            with sqlite3.connect(service.db_path, factory=_ClosingConnection) as connection:
                 for index in range(2):
                     connection.execute(
                         """
@@ -719,13 +902,13 @@ class XinchaoServiceTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as root:
             service = XinchaoService(config(root, monologue_enabled=True))
             service.evaluator = FakeEvaluator(handoff_ready=False)
-            event = await service.record_event("写入一件需要等待的事。", "hold", "a")
+            event = await service.record_event("写入一件需要等待的事。", "mailbox", "a")
 
             def backdate(minutes):
                 stamp = (
                     datetime.now(BEIJING_TIMEZONE) - timedelta(minutes=minutes)
                 ).isoformat(timespec="seconds")
-                with sqlite3.connect(service.db_path) as connection:
+                with sqlite3.connect(service.db_path, factory=_ClosingConnection) as connection:
                     connection.execute(
                         "UPDATE xinchao_state SET last_event_at=?, last_presence_at=? "
                         "WHERE state_id=1",
@@ -762,7 +945,7 @@ class XinchaoServiceTests(unittest.IsolatedAsyncioTestCase):
             old_stamp = (
                 datetime.now(BEIJING_TIMEZONE) - timedelta(minutes=61)
             ).isoformat(timespec="seconds")
-            with sqlite3.connect(service.db_path) as connection:
+            with sqlite3.connect(service.db_path, factory=_ClosingConnection) as connection:
                 connection.execute(
                     "UPDATE xinchao_state SET last_event_at=?, last_presence_at=? "
                     "WHERE state_id=1",
@@ -781,13 +964,13 @@ class XinchaoServiceTests(unittest.IsolatedAsyncioTestCase):
                 config(root, monologue_enabled=True, darkflow_stage_hours=[0])
             )
             service.evaluator = AftereffectEvaluator()
-            await service.record_event("我写清了一件事和当时的感受。", "hold", "a")
+            await service.record_event("我写清了一件事和当时的感受。", "mailbox", "a")
             before = await service.status()
             first = await service.settle_darkflow()
             after_first = await service.status()
             second = await service.settle_darkflow()
             after_second = await service.status()
-            with sqlite3.connect(service.db_path) as connection:
+            with sqlite3.connect(service.db_path, factory=_ClosingConnection) as connection:
                 row = connection.execute(
                     "SELECT aftereffect_json, aftereffect_applied_at "
                     "FROM xinchao_darkflow WHERE slot_id=1"
@@ -813,7 +996,12 @@ class XinchaoServiceTests(unittest.IsolatedAsyncioTestCase):
     async def test_memory_resonance_reaches_darkflow_without_changing_buckets(self):
         with tempfile.TemporaryDirectory() as root:
             service = XinchaoService(
-                config(root, monologue_enabled=True, darkflow_stage_hours=[0])
+                config(
+                    root,
+                    monologue_enabled=True,
+                    darkflow_stage_hours=[0],
+                    memory_echo_enabled=False,
+                )
             )
             evaluator = ProgressiveEvaluator()
             service.evaluator = evaluator
@@ -827,7 +1015,20 @@ class XinchaoServiceTests(unittest.IsolatedAsyncioTestCase):
             ]
             provider = AsyncMock(return_value=resonance)
             service.set_memory_resonance_provider(provider)
-            await service.record_event("我写下了一件事和当时的感受。", "hold", "a")
+            await service.record_event("我写下了一件事和当时的感受。", "mailbox", "a")
+            old_stamp = (
+                datetime.now(BEIJING_TIMEZONE) - timedelta(minutes=31)
+            ).isoformat(timespec="seconds")
+            connection = sqlite3.connect(service.db_path)
+            try:
+                connection.execute(
+                    "UPDATE xinchao_state SET last_event_at=?, last_presence_at=? "
+                    "WHERE state_id=1",
+                    (old_stamp, old_stamp),
+                )
+                connection.commit()
+            finally:
+                connection.close()
             result = await service.settle_darkflow()
 
         self.assertEqual(result["status"], "updated")
@@ -836,6 +1037,71 @@ class XinchaoServiceTests(unittest.IsolatedAsyncioTestCase):
             evaluator.darkflow_inputs[0]["memory_resonance"], resonance
         )
 
+    async def test_memory_echo_is_secondary_explainable_and_reversible(self):
+        with tempfile.TemporaryDirectory() as root:
+            service = XinchaoService(
+                config(
+                    root,
+                    memory_echo_enabled=True,
+                    memory_echo_threshold=0.68,
+                    memory_echo_max_ratio=0.25,
+                )
+            )
+            service.evaluator = MemoryEchoEvaluator(tag="当前事件", handoff_ready=False)
+            provider = AsyncMock(
+                return_value=[
+                    {
+                        "source": "memory",
+                        "bucket_id": "older-memory",
+                        "name": "以前也等过她",
+                        "excerpt": "那次我也很想靠近她，后来终于安心下来。",
+                        "relevance": 0.91,
+                    }
+                ]
+            )
+            service.set_memory_resonance_provider(provider)
+            recorded = await service.record_event(
+                "这一次我又在等她回来，心里有点难过。",
+                "hold",
+                "current-memory",
+                correction_key="memory:current-memory",
+            )
+            connection = sqlite3.connect(service.db_path)
+            try:
+                connection.row_factory = sqlite3.Row
+                row = connection.execute(
+                    "SELECT direct_deltas_json, deltas_json, memory_echo_json "
+                    "FROM xinchao_events WHERE event_id=?",
+                    (recorded["event_id"],),
+                ).fetchone()
+            finally:
+                connection.close()
+            direct = json.loads(row["direct_deltas_json"])
+            combined = json.loads(row["deltas_json"])
+            echo = json.loads(row["memory_echo_json"])
+            queued = await asyncio.to_thread(
+                service._queue_sync,
+                "修正后的写入",
+                "hold",
+                "current-memory",
+                "",
+                "memory:current-memory",
+            )
+            rollback = await asyncio.to_thread(
+                service._rollback_superseded_sync, queued["event_id"]
+            )
+
+        echo_total = sum(abs(float(value)) for value in echo["deltas"].values())
+        direct_total = sum(abs(float(value)) for value in direct.values())
+        self.assertEqual(recorded["memory_echo"]["label"], "记忆回响")
+        self.assertEqual(echo["source_id"], "older-memory")
+        self.assertLessEqual(echo_total, direct_total * 0.25 + 0.0001)
+        self.assertNotEqual(combined, direct)
+        self.assertEqual(rollback["status"], "rolled_back")
+        self.assertEqual(rollback["reversed_pipes"], {
+            name: -float(value) for name, value in combined.items()
+        })
+
     async def test_private_thought_text_reason_and_intensity_reach_darkflow(self):
         with tempfile.TemporaryDirectory() as root:
             service = XinchaoService(
@@ -843,7 +1109,7 @@ class XinchaoServiceTests(unittest.IsolatedAsyncioTestCase):
             )
             evaluator = PrivateThoughtDarkflowEvaluator()
             service.evaluator = evaluator
-            await service.record_event("她要离开一会儿，我心里有点舍不得。", "hold", "a")
+            await service.record_event("她要离开一会儿，我心里有点舍不得。", "mailbox", "a")
             result = await service.settle_darkflow()
 
         self.assertEqual(result["status"], "updated")
@@ -921,7 +1187,7 @@ class XinchaoServiceTests(unittest.IsolatedAsyncioTestCase):
         )
         result = await evaluator.evaluate("我完成了测试，心里有点开心。")
         self.assertEqual(result["event_tag"], "测试")
-        self.assertEqual(create.await_count, 2)
+        self.assertEqual(create.await_count, 3)
         self.assertEqual(
             create.await_args.kwargs["extra_body"],
             {"thinking": {"type": "disabled"}},
@@ -937,7 +1203,7 @@ class XinchaoServiceTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(first["status"], "applied")
             self.assertEqual(exact["status"], "duplicate")
             self.assertEqual(paraphrase["status"], "duplicate")
-            with sqlite3.connect(service.db_path) as connection:
+            with sqlite3.connect(service.db_path, factory=_ClosingConnection) as connection:
                 applied = connection.execute(
                     "SELECT COUNT(*) FROM xinchao_events WHERE status='applied'"
                 ).fetchone()[0]
@@ -976,14 +1242,14 @@ class XinchaoServiceTests(unittest.IsolatedAsyncioTestCase):
             evaluator = ProgressiveEvaluator()
             service.evaluator = evaluator
             await service.record_event(
-                "我记下了完整事件和当时的感受。", "hold", "a"
+                "我记下了完整事件和当时的感受。", "mailbox", "a"
             )
 
             async def set_absence(hours):
                 moment = datetime.now(BEIJING_TIMEZONE) - timedelta(
                     hours=hours + service.silence_to_absence_hours
                 )
-                with sqlite3.connect(service.db_path) as connection:
+                with sqlite3.connect(service.db_path, factory=_ClosingConnection) as connection:
                     connection.execute(
                         "UPDATE xinchao_state SET last_event_at=?, last_presence_at=?, "
                         "static_started_at=? WHERE state_id=1",
@@ -1012,7 +1278,7 @@ class XinchaoServiceTests(unittest.IsolatedAsyncioTestCase):
             final = await service.darkflow_status()
             self.assertEqual(final["sleep_stage"], "hibernating")
             self.assertIsNone(final["next_stage_at"])
-            with sqlite3.connect(service.db_path) as connection:
+            with sqlite3.connect(service.db_path, factory=_ClosingConnection) as connection:
                 count = connection.execute(
                     "SELECT COUNT(*) FROM xinchao_darkflow"
                 ).fetchone()[0]
@@ -1025,7 +1291,7 @@ class XinchaoServiceTests(unittest.IsolatedAsyncioTestCase):
             await service.record_boot_delivery("session-a", "开机正文")
             self.assertIsNotNone(await service.boot_delivery("session-a"))
             self.assertIsNone(await service.boot_delivery("session-b"))
-            with sqlite3.connect(service.db_path) as connection:
+            with sqlite3.connect(service.db_path, factory=_ClosingConnection) as connection:
                 stored = connection.execute(
                     "SELECT session_hash FROM xinchao_boot_deliveries"
                 ).fetchone()[0]
@@ -1128,7 +1394,7 @@ class XinchaoServiceTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(first["repeated"])
             self.assertFalse(repeated["repeated"])
             self.assertEqual(first["cycle_id"], repeated["cycle_id"])
-            with sqlite3.connect(service.db_path) as connection:
+            with sqlite3.connect(service.db_path, factory=_ClosingConnection) as connection:
                 stored_pipes = json.loads(
                     connection.execute(
                         "SELECT pipes_json FROM xinchao_state WHERE state_id=1"
@@ -1142,70 +1408,23 @@ class XinchaoServiceTests(unittest.IsolatedAsyncioTestCase):
             service.evaluator = FakeEvaluator(tag="第二件事")
             await service.record_event("后来发生了另一件事，我也有新的感受。", "hold", "b")
             second = await service.consume_boot()
-            self.assertGreater(second["cycle_id"], first["cycle_id"])
+            # A narratively complete write is not an elapsed silence boundary.
+            # Until real inactivity begins, later writes remain in the active
+            # cycle; only a mailbox write can make that cycle silence-eligible.
+            self.assertEqual(second["cycle_id"], first["cycle_id"])
 
-    async def test_seen_acknowledgement_partly_settles_without_timer(self):
+    async def test_seen_acknowledgement_is_side_effect_free(self):
         with tempfile.TemporaryDirectory() as root:
             service = XinchaoService(
                 config(root, monologue_enabled=True, monologue_after_hours=0)
             )
-            service.evaluator = FakeEvaluator(tag="等待回应")
-            await service.record_event(
-                "我刚刚发出一条想念，也写清了当时感受。", "mailbox", "seen"
-            )
-            await service.settle_darkflow()
-            moment = datetime(2026, 8, 11, 20, 0, tzinfo=BEIJING_TIMEZONE)
-            pipes = service._baseline_floors()
-            pipes.update(
-                {
-                    "想靠近": 0.80,
-                    "想黏着": 0.70,
-                    "想知道她在干嘛": 0.65,
-                    "想分享": 0.50,
-                    "性欲": 0.60,
-                    "生气": 0.55,
-                }
-            )
-            with sqlite3.connect(service.db_path) as connection:
-                connection.execute(
-                    "UPDATE xinchao_state SET pipes_json=?, last_event_at=?, "
-                    "last_presence_at=? WHERE state_id=1",
-                    (
-                        json.dumps(pipes, ensure_ascii=False),
-                        moment.isoformat(),
-                        moment.isoformat(),
-                    ),
-                )
-            with patch("xinchao_store.beijing_now", return_value=moment):
-                before = await service.status()
-                darkflow_before = await service.pending_darkflow()
-                self.assertIsNotNone(darkflow_before)
-                result = await service.acknowledge_seen()
-                after = await service.status()
-                darkflow_after = await service.pending_darkflow()
-
+            before = await service.status()
+            result = await service.acknowledge_seen()
+            after = await service.status()
             self.assertEqual(result["status"], "acknowledged")
-            self.assertEqual(result["previous_cycle_id"], before["cycle_id"])
-            self.assertEqual(after["cycle_id"], before["cycle_id"] + 1)
-            self.assertTrue(after["available"])
-            self.assertEqual(after["cycle_origin"], "acknowledgement")
-            self.assertEqual(after["interaction_phase"], "active")
-            self.assertFalse(after["static_ready"])
-            self.assertIsNone(result["silence_started_at"])
-            self.assertFalse(result["pending_darkflow_carried"])
-            self.assertIsNone(darkflow_after)
-            self.assertEqual(after["pipes"]["想靠近"], 0.18)
-            self.assertEqual(after["pipes"]["想黏着"], 0.12)
-            self.assertEqual(after["pipes"]["性欲"], 0.15)
-            self.assertEqual(after["pipes"]["生气"], 0.0)
-            self.assertEqual(after["pipes"]["开心"], 0.04)
-            self.assertEqual(after["pipes"]["满足"], 0.06)
-            with sqlite3.connect(service.db_path) as connection:
-                transition = connection.execute(
-                    "SELECT transition_type FROM xinchao_transitions "
-                    "ORDER BY transition_id DESC LIMIT 1"
-                ).fetchone()
-            self.assertEqual(transition[0], "behavior_acknowledged")
+            self.assertFalse(result["state_changed"])
+            self.assertEqual(after["cycle_id"], before["cycle_id"])
+            self.assertEqual(after["pipes"], before["pipes"])
 
     async def test_darkflow_is_one_slot_and_manager_reads_do_not_consume(self):
         with tempfile.TemporaryDirectory() as root:
@@ -1213,7 +1432,7 @@ class XinchaoServiceTests(unittest.IsolatedAsyncioTestCase):
                 config(root, monologue_enabled=True, monologue_after_hours=0)
             )
             service.evaluator = FakeEvaluator(tag="第一轮")
-            await service.record_event("第一轮发生了一件事，我也写清了感受。", "hold", "a")
+            await service.record_event("第一轮发生了一件事，我也写清了感受。", "mailbox", "8")
             first = await service.consume_boot(
                 mailbox_context={
                     "message_id": 8,
@@ -1239,11 +1458,11 @@ class XinchaoServiceTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(delivered["content"], "测试暗涌")
 
             service.evaluator = FakeEvaluator(tag="第二轮")
-            await service.record_event("第二轮又发生了一件新事，我也写清了感受。", "hold", "b")
+            await service.record_event("第二轮又发生了一件新事，我也写清了感受。", "mailbox", "b")
             second = await service.consume_boot()
             latest = await service.darkflow_status()
             self.assertEqual(latest["cycle_id"], second["cycle_id"])
-            with sqlite3.connect(service.db_path) as connection:
+            with sqlite3.connect(service.db_path, factory=_ClosingConnection) as connection:
                 count = connection.execute(
                     "SELECT COUNT(*) FROM xinchao_darkflow"
                 ).fetchone()[0]
@@ -1256,14 +1475,14 @@ class XinchaoServiceTests(unittest.IsolatedAsyncioTestCase):
             )
             service.evaluator = FakeEvaluator(tag="第一轮")
             await service.record_event(
-                "第一轮发生了一件事，我也写清了感受。", "hold", "a"
+                "第一轮发生了一件事，我也写清了感受。", "mailbox", "a"
             )
             first = await service.consume_boot()
             self.assertEqual(first["darkflow"], "测试暗涌")
             self.assertIsNotNone(await service.pending_darkflow())
 
             before = await service.status()
-            with sqlite3.connect(service.db_path) as connection:
+            with sqlite3.connect(service.db_path, factory=_ClosingConnection) as connection:
                 old_pipes = {name: 0.9 for name in empty_pipes()}
                 connection.execute(
                     "UPDATE xinchao_state SET static_ready=1, pipes_json=? WHERE state_id=1",
@@ -1314,7 +1533,7 @@ class XinchaoServiceTests(unittest.IsolatedAsyncioTestCase):
             result = await service.record_event(
                 "有人在晚上来找我，我当时很开心。", "mailbox", "9"
             )
-            with sqlite3.connect(service.db_path) as connection:
+            with sqlite3.connect(service.db_path, factory=_ClosingConnection) as connection:
                 row = connection.execute(
                     "SELECT content, context_card, cycle_id FROM xinchao_events"
                 ).fetchone()
@@ -1330,7 +1549,7 @@ class XinchaoServiceTests(unittest.IsolatedAsyncioTestCase):
             service.evaluator = FakeEvaluator(fail=True)
             result = await service.record_event("这条记忆已经保存，评估暂时失败。", "hold", "a")
             self.assertEqual(result["status"], "pending")
-            with sqlite3.connect(service.db_path) as connection:
+            with sqlite3.connect(service.db_path, factory=_ClosingConnection) as connection:
                 row = connection.execute(
                     "SELECT status, content FROM xinchao_events"
                 ).fetchone()
@@ -1342,14 +1561,468 @@ class XinchaoServiceTests(unittest.IsolatedAsyncioTestCase):
             service = XinchaoService(config(root))
             service.evaluator = FakeEvaluator()
             await service.record_event("完整正文只属于记忆桶。", "hold", "a")
-            with sqlite3.connect(service.db_path) as connection:
+            with sqlite3.connect(service.db_path, factory=_ClosingConnection) as connection:
                 content = connection.execute(
                     "SELECT content FROM xinchao_events WHERE status='applied'"
                 ).fetchone()[0]
             self.assertIsNone(content)
 
+    async def test_child_safe_event_export_excludes_adult_memory_body(self):
+        with tempfile.TemporaryDirectory() as root:
+            service = XinchaoService(config(root))
+            service.evaluator = ChildSafeEvaluator()
+            result = await service.record_event(
+                "这段成人记忆正文不能进入养育室。", "mailbox", "nursery-safe"
+            )
+            exported = service.child_safe_event_for_nursery(result["event_id"])
+            self.assertEqual(exported["source_key"], "mailbox:nursery-safe")
+            self.assertEqual(
+                exported["source_version"],
+                f"{result['created_at']}#{result['event_id']}",
+            )
+            self.assertEqual(exported["category"], "routine")
+            self.assertEqual(exported["child_safe_summary"], "今天的作息有一点变化，可以慢慢适应。")
+            self.assertEqual(exported["occurred_at"], result["created_at"])
+            self.assertNotIn("成人记忆正文", json.dumps(exported, ensure_ascii=False))
+
+    async def test_child_safe_event_export_maps_only_real_mailbox_or_memory_writes(self):
+        with tempfile.TemporaryDirectory() as root:
+            service = XinchaoService(config(root))
+            service.evaluator = ChildSafeEvaluator(tag="信箱事件")
+            mailbox = await service.record_event("信箱正文不能泄露。", "mailbox", "73")
+            service.evaluator = ChildSafeEvaluator(tag="记忆事件")
+            memory = await service.record_event("记忆正文不能泄露。", "manager_memory", "bucket-8")
+            service.evaluator = ChildSafeEvaluator(tag="念痕事件")
+            trace = await service.record_event("念痕正文不能泄露。", "trace_append", "trace-4")
+
+            mailbox_export = service.child_safe_event_for_nursery(mailbox["event_id"])
+            memory_export = service.child_safe_event_for_nursery(memory["event_id"])
+
+            self.assertEqual(mailbox_export["source_key"], "mailbox:73")
+            self.assertEqual(memory_export["source_key"], "memory:bucket-8")
+            self.assertIsNone(service.child_safe_event_for_nursery(trace["event_id"]))
+            exported = json.dumps([mailbox_export, memory_export], ensure_ascii=False)
+            for forbidden in (
+                "信箱正文", "记忆正文", "event_summary", "context_card", "evidence", "thought_text",
+            ):
+                self.assertNotIn(forbidden, exported)
+
+    async def test_child_safe_event_export_version_is_write_stable_not_model_time(self):
+        with tempfile.TemporaryDirectory() as root:
+            service = XinchaoService(config(root))
+            service.evaluator = ChildSafeEvaluator()
+            result = await service.record_event("稳定的信箱写入。", "mailbox", "18")
+            first = service.child_safe_event_for_nursery(result["event_id"])
+            with sqlite3.connect(service.db_path, factory=_ClosingConnection) as connection:
+                connection.execute(
+                    "UPDATE xinchao_events SET processed_at=? WHERE event_id=?",
+                    ("2099-01-01T00:00:00+08:00", result["event_id"]),
+                )
+            second = service.child_safe_event_for_nursery(result["event_id"])
+
+            self.assertEqual(first, second)
+            self.assertEqual(
+                second["source_version"],
+                f"{result['created_at']}#{result['event_id']}",
+            )
+
+    async def test_child_safe_source_reference_is_minimal_and_survives_supersession(self):
+        with tempfile.TemporaryDirectory() as root:
+            service = XinchaoService(config(root))
+            service.evaluator = ChildSafeEvaluator()
+            first = await service.record_event(
+                "成人正文绝不能出现在来源引用中。",
+                "mailbox",
+                "42",
+                correction_key="mailbox:42",
+            )
+            replacement = await service.record_event(
+                "修正后的成人正文同样不能出现在来源引用中。",
+                "mailbox",
+                "42",
+                correction_key="mailbox:42",
+            )
+            reference = service.child_safe_source_reference_for_nursery(
+                first["event_id"]
+            )
+
+        self.assertEqual(
+            reference,
+            {
+                "source_key": "mailbox:42",
+                "source_version": f"{first['created_at']}#{first['event_id']}",
+                "source_type": "mailbox_event",
+                "status": "superseded",
+            },
+        )
+        self.assertNotIn("成人正文", json.dumps(reference, ensure_ascii=False))
+        self.assertEqual(replacement["correction"]["supersedes_event_id"], first["event_id"])
+
+    async def test_child_safe_source_reference_fails_closed_without_safe_event_or_source(self):
+        with tempfile.TemporaryDirectory() as root:
+            service = XinchaoService(config(root))
+            service.evaluator = ChildSafeEvaluator()
+            trace = await service.record_event("念痕正文不能导出。", "trace_append", "trace-1")
+            service.evaluator = FakeEvaluator()
+            no_safe_update = await service.record_event(
+                "没有适龄摘要的成人正文。", "mailbox", "43"
+            )
+
+            trace_reference = service.child_safe_source_reference_for_nursery(
+                trace["event_id"]
+            )
+            no_safe_reference = service.child_safe_source_reference_for_nursery(
+                no_safe_update["event_id"]
+            )
+
+        self.assertIsNone(trace_reference)
+        self.assertIsNone(no_safe_reference)
+
+    async def test_child_safe_source_references_return_only_safe_versions_for_one_source(self):
+        with tempfile.TemporaryDirectory() as root:
+            service = XinchaoService(config(root))
+            service.evaluator = ChildSafeEvaluator()
+            first = await service.record_event(
+                "第一段成人正文不能泄露。",
+                "mailbox",
+                "44",
+                correction_key="mailbox:44",
+            )
+            second = await service.record_event(
+                "第二段成人正文不能泄露。",
+                "mailbox",
+                "44",
+                correction_key="mailbox:44",
+            )
+            service.evaluator = FakeEvaluator()
+            await service.record_event(
+                "没有安全摘要的成人正文不能列出。",
+                "mailbox",
+                "44",
+                correction_key="mailbox:44",
+            )
+            references = service.child_safe_source_references_for_nursery(
+                "mailbox:44"
+            )
+
+        self.assertEqual(
+            references,
+            [
+                {
+                    "source_key": "mailbox:44",
+                    "source_version": f"{first['created_at']}#{first['event_id']}",
+                    "source_type": "mailbox_event",
+                    "status": "superseded",
+                },
+                {
+                    "source_key": "mailbox:44",
+                    "source_version": f"{second['created_at']}#{second['event_id']}",
+                    "source_type": "mailbox_event",
+                    "status": "superseded",
+                },
+            ],
+        )
+        self.assertEqual(service.child_safe_source_references_for_nursery(""), [])
+        self.assertNotIn("成人正文", json.dumps(references, ensure_ascii=False))
+
 
 class XinchaoServerHookTests(unittest.IsolatedAsyncioTestCase):
+    async def test_nursery_bridge_uses_only_safe_envelope_and_direct_runtime(self):
+        adult_body = "这段成人正文绝不能传给养育室。"
+        safe_event = {
+            "source_key": "mailbox:74",
+            "source_version": "new#2",
+            "category": "routine",
+            "child_safe_summary": "今天有一点小变化，可以慢慢适应。",
+            "occurred_at": "2026-09-03T00:00:00+00:00",
+            "adult_body": adult_body,
+        }
+        runtime = SimpleNamespace(
+            apply_anima_family_event=AsyncMock(),
+            supersede_anima_source=Mock(),
+            revoke_anima_source=Mock(),
+        )
+        provider = SimpleNamespace(get=Mock(return_value=runtime))
+        with (
+            patch.object(
+                server,
+                "nursery_internal_api",
+                SimpleNamespace(provider=provider),
+            ),
+            patch.object(
+                server.xinchao_service,
+                "child_safe_event_for_nursery",
+                return_value=safe_event,
+            ),
+        ):
+            await server._bridge_anima_nursery_event(
+                {"status": "applied", "event_id": 2}, source_key="mailbox:74"
+            )
+
+        expected = {
+            key: safe_event[key]
+            for key in (
+                "source_key",
+                "source_version",
+                "category",
+                "child_safe_summary",
+                "occurred_at",
+            )
+        }
+        provider.get.assert_called_once()
+        runtime.apply_anima_family_event.assert_awaited_once_with(
+            expected, server.SourceType.MAILBOX_EVENT
+        )
+        runtime.supersede_anima_source.assert_not_called()
+        runtime.revoke_anima_source.assert_not_called()
+        self.assertNotIn(adult_body, repr(runtime.apply_anima_family_event.await_args))
+
+    async def test_nursery_bridge_supersedes_before_memory_apply(self):
+        calls = []
+
+        def supersede(**kwargs):
+            calls.append(("supersede", kwargs))
+
+        async def apply(event, source_type):
+            calls.append(("apply", event, source_type))
+
+        safe_event = {
+            "source_key": "memory:bucket-1",
+            "source_version": "new#2",
+            "category": "routine",
+            "child_safe_summary": "家里平静地完成了一件小事。",
+            "occurred_at": "2026-09-03T00:00:00+00:00",
+        }
+        runtime = SimpleNamespace(
+            apply_anima_family_event=apply,
+            supersede_anima_source=supersede,
+            revoke_anima_source=Mock(),
+        )
+        with (
+            patch.object(
+                server,
+                "nursery_internal_api",
+                SimpleNamespace(provider=SimpleNamespace(get=Mock(return_value=runtime))),
+            ),
+            patch.object(
+                server.xinchao_service,
+                "child_safe_event_for_nursery",
+                return_value=safe_event,
+            ),
+        ):
+            await server._bridge_anima_nursery_event(
+                {"status": "applied", "event_id": 2},
+                source_key="memory:bucket-1",
+                previous_references=[
+                    {"source_key": "memory:bucket-1", "source_version": "old#1"}
+                ],
+            )
+
+        self.assertEqual([item[0] for item in calls], ["supersede", "apply"])
+        self.assertEqual(
+            calls[0][1]["source_type"], server.SourceType.ANIMA_MEMORY
+        )
+        self.assertEqual(
+            calls[0][1]["superseded_by_source_version"], safe_event["source_version"]
+        )
+        self.assertEqual(calls[1][1], safe_event)
+        self.assertEqual(calls[1][2], server.SourceType.ANIMA_MEMORY)
+
+    async def test_nursery_bridge_without_safe_event_revokes_prior_versions(self):
+        revoke = Mock()
+        runtime = SimpleNamespace(
+            apply_anima_family_event=AsyncMock(),
+            supersede_anima_source=Mock(),
+            revoke_anima_source=revoke,
+        )
+        with (
+            patch.object(
+                server,
+                "nursery_internal_api",
+                SimpleNamespace(provider=SimpleNamespace(get=Mock(return_value=runtime))),
+            ),
+            patch.object(
+                server.xinchao_service,
+                "child_safe_event_for_nursery",
+                return_value=None,
+            ),
+        ):
+            await server._bridge_anima_nursery_event(
+                {"status": "applied", "event_id": 2},
+                source_key="mailbox:74",
+                previous_references=[
+                    {"source_key": "mailbox:74", "source_version": "old#1"},
+                    {"source_key": "mailbox:74", "source_version": "old#2"},
+                ],
+            )
+
+        self.assertEqual(revoke.call_count, 2)
+        runtime.apply_anima_family_event.assert_not_awaited()
+        runtime.supersede_anima_source.assert_not_called()
+
+    async def test_nursery_bridge_does_not_apply_after_failed_supersede(self):
+        safe_event = {
+            "source_key": "mailbox:74",
+            "source_version": "new#2",
+            "category": "routine",
+            "child_safe_summary": "今天有一点小变化，可以慢慢适应。",
+            "occurred_at": "2026-09-03T00:00:00+00:00",
+        }
+        runtime = SimpleNamespace(
+            apply_anima_family_event=AsyncMock(),
+            supersede_anima_source=Mock(side_effect=RuntimeError("offline")),
+            revoke_anima_source=Mock(),
+        )
+        with (
+            patch.object(
+                server,
+                "nursery_internal_api",
+                SimpleNamespace(provider=SimpleNamespace(get=Mock(return_value=runtime))),
+            ),
+            patch.object(
+                server.xinchao_service,
+                "child_safe_event_for_nursery",
+                return_value=safe_event,
+            ),
+        ):
+            await server._bridge_anima_nursery_event(
+                {"status": "applied", "event_id": 2},
+                source_key="mailbox:74",
+                previous_references=[
+                    {"source_key": "mailbox:74", "source_version": "old#1"}
+                ],
+            )
+
+        runtime.apply_anima_family_event.assert_not_awaited()
+
+    async def test_nursery_bridge_applies_when_old_source_was_never_exported(self):
+        class SourceNotFound(Exception):
+            code = "SOURCE_NOT_FOUND"
+
+        safe_event = {
+            "source_key": "mailbox:74",
+            "source_version": "new#2",
+            "category": "routine",
+            "child_safe_summary": "今天有一点小变化，可以慢慢适应。",
+            "occurred_at": "2026-09-03T00:00:00+00:00",
+        }
+        runtime = SimpleNamespace(
+            apply_anima_family_event=AsyncMock(),
+            supersede_anima_source=Mock(side_effect=SourceNotFound()),
+            revoke_anima_source=Mock(),
+        )
+        with (
+            patch.object(
+                server,
+                "nursery_internal_api",
+                SimpleNamespace(provider=SimpleNamespace(get=Mock(return_value=runtime))),
+            ),
+            patch.object(
+                server.xinchao_service,
+                "child_safe_event_for_nursery",
+                return_value=safe_event,
+            ),
+        ):
+            await server._bridge_anima_nursery_event(
+                {"status": "applied", "event_id": 2},
+                source_key="mailbox:74",
+                previous_references=[
+                    {"source_key": "mailbox:74", "source_version": "old#1"}
+                ],
+            )
+
+        runtime.apply_anima_family_event.assert_awaited_once_with(
+            safe_event, server.SourceType.MAILBOX_EVENT
+        )
+
+    async def test_nursery_runtime_failure_cannot_break_write_sidecars(self):
+        safe_event = {
+            "source_key": "mailbox:74",
+            "source_version": "new#2",
+            "category": "routine",
+            "child_safe_summary": "今天有一点小变化，可以慢慢适应。",
+            "occurred_at": "2026-09-03T00:00:00+00:00",
+        }
+        runtime = SimpleNamespace(
+            apply_anima_family_event=AsyncMock(side_effect=RuntimeError("offline")),
+            supersede_anima_source=Mock(),
+            revoke_anima_source=Mock(),
+        )
+        with (
+            patch.object(
+                server,
+                "nursery_internal_api",
+                SimpleNamespace(provider=SimpleNamespace(get=Mock(return_value=runtime))),
+            ),
+            patch.object(
+                server,
+                "_record_xinchao_event",
+                new=AsyncMock(return_value={"status": "applied", "event_id": 2}),
+            ),
+            patch.object(
+                server.xinchao_service,
+                "child_safe_event_for_nursery",
+                return_value=safe_event,
+            ),
+            patch.object(
+                server.task_service,
+                "process_event",
+                new=AsyncMock(return_value={"status": "ok"}),
+            ),
+            patch.object(
+                server.fact_timeline_service,
+                "process_event",
+                new=AsyncMock(return_value={"status": "ok"}),
+            ),
+            patch.object(server.continuity_ledger, "append", new=AsyncMock()),
+        ):
+            result = await server._record_write_sidecars(
+                "这段成人正文仍只属于主系统。", "mailbox", "74"
+            )
+
+        self.assertEqual(result["xinchao"]["status"], "applied")
+        self.assertEqual(result["tasks"]["status"], "ok")
+        self.assertEqual(result["fact_candidates"]["status"], "ok")
+        runtime.apply_anima_family_event.assert_awaited_once()
+
+    async def test_mailbox_edit_and_delete_wire_safe_lifecycle_helpers(self):
+        calls = []
+
+        async def update(message_id, message):
+            calls.append("update")
+            return {"message_id": message_id, "message": message, "updated_at": "now"}
+
+        async def references(message_id):
+            calls.append("references")
+            return [{"source_key": "mailbox:7", "source_version": "old#1"}]
+
+        async def record(*args, **kwargs):
+            calls.append("record")
+            self.assertEqual(kwargs["previous_nursery_references"][0]["source_version"], "old#1")
+            return {}
+
+        mailbox = SimpleNamespace(
+            get=AsyncMock(return_value={"message_id": 7, "message": "旧留言"}),
+            update=update,
+            delete=AsyncMock(return_value={"message_id": 7, "deleted_at": "now"}),
+        )
+        revoke = AsyncMock()
+        with (
+            patch.object(server, "mailbox_store", mailbox),
+            patch.object(server, "_mailbox_nursery_references", new=references),
+            patch.object(server, "_record_write_sidecars", new=record),
+            patch.object(server, "_revoke_mailbox_nursery_events", new=revoke),
+        ):
+            updated = await server.mailbox(
+                message_id=7, message="新留言", confirm=True
+            )
+            deleted = await server.mailbox(message_id=7, delete=True, confirm=True)
+
+        self.assertIn("已修改", updated)
+        self.assertIn("已删除", deleted)
+        self.assertEqual(calls, ["update", "references", "record"])
+        revoke.assert_awaited_once_with(7)
+
     def test_write_sidecar_identity_binds_request_to_actual_write(self):
         with patch.object(server, "_active_mcp_event_key", return_value="runtime-session:1\0" "2"):
             first = server._write_sidecar_event_id("第一封信", "mailbox", "74")

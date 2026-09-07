@@ -41,6 +41,9 @@ class BehaviorService:
         self.presence_retry_minutes = max(
             5, int(settings.get("presence_retry_minutes", 15))
         )
+        self.follow_up_delay_minutes = max(
+            1, min(1440, int(settings.get("follow_up_delay_minutes", 60)))
+        )
         self.follow_up_hormone_threshold = max(
             0.0,
             min(1.0, float(settings.get("follow_up_hormone_threshold", 0.10))),
@@ -74,6 +77,7 @@ class BehaviorService:
         self.store = BehaviorStore(config)
         self.feedback_callback = None
         self.tendency_provider = None
+        self.memory_resonance_provider = None
 
     @staticmethod
     def _parse_clock(value, fallback: time) -> time:
@@ -114,6 +118,10 @@ class BehaviorService:
     def set_tendency_provider(self, callback) -> None:
         """Attach the read-only 性格轨迹 context used by behavior decisions."""
         self.tendency_provider = callback
+
+    def set_memory_resonance_provider(self, callback) -> None:
+        """Attach bounded historical recall for an actual push judgment."""
+        self.memory_resonance_provider = callback
 
     async def _tendency_context(self) -> dict:
         if self.tendency_provider is None:
@@ -189,19 +197,19 @@ class BehaviorService:
 
     @staticmethod
     def _hormone_drive(pipes: dict | None) -> tuple[str, float]:
-        """Return the strongest state that can naturally motivate a check-in."""
-        relevant = (
-            "想知道她在干嘛",
-            "责任",
-            "想靠近",
-            "想黏着",
-            "好奇",
-        )
-        values = {
-            name: max(0.0, min(1.0, float((pipes or {}).get(name, 0.0))))
-            for name in relevant
-        }
-        return max(values.items(), key=lambda item: item[1])
+        """Return the strongest actual pipe, without privileging an old subset.
+
+        The value is only an auditable summary on the candidate.  DeepSeek still
+        receives all pipes, but the summary must not make 43 of 48 states look
+        invisible before that judgment starts.
+        """
+        values = {}
+        for name, raw_value in (pipes or {}).items():
+            try:
+                values[str(name)] = max(0.0, min(1.0, float(raw_value)))
+            except (TypeError, ValueError):
+                continue
+        return max(values.items(), key=lambda item: (item[1], item[0])) if values else ("", 0.0)
 
     @staticmethod
     def _top_pipe_drivers(pipes: dict | None, limit: int = 6) -> list[dict]:
@@ -225,13 +233,22 @@ class BehaviorService:
     ) -> dict:
         """Choose a live expression angle without always following one top pipe."""
         pipes = state.get("pipes", {}) or {}
+        # This is a *selection hint*, not a rigid state-to-message template.
+        # Every pipe belongs to a readable angle, so every real state can affect
+        # whether / how the later DeepSeek decision speaks.  The model still
+        # sees all 48 raw values and may choose wait or skip.
         groups = {
             "靠近她": ("想靠近", "想黏着", "肌肤饥渴", "性欲"),
-            "惦记她": ("想知道她在干嘛", "责任"),
-            "跟她分享": ("想分享", "好奇", "开心"),
-            "坦白低落": ("难过", "自省"),
-            "说出不爽": ("醋", "生气"),
-            "安静满足": ("满足",),
+            "惦记与守候": ("想知道她在干嘛", "想得到回应", "期待", "责任"),
+            "分享与喜悦": ("想分享", "好奇", "开心", "兴奋", "感动"),
+            "关怀与修复": ("想照顾她", "想让她开心", "想修复关系", "安心", "满足", "放松"),
+            "需要被理解": ("想被理解", "想被确认", "委屈", "失落", "孤独"),
+            "低落与不安": ("难过", "不安", "害怕", "紧绷"),
+            "诚实复盘": ("复盘", "自省", "权衡", "求证", "愧疚"),
+            "思绪打转": ("反刍", "预演", "警觉", "专注"),
+            "给自己留白": ("想暂时独处", "回避", "压抑", "无语", "疲惫"),
+            "关系摩擦": ("醋", "生气", "取悦压力"),
+            "日常能量": ("精力", "社交", "闲"),
         }
         recent = list(recent_intents or [])
         blocked = excluded or set()
@@ -417,79 +434,18 @@ class BehaviorService:
         return max(self.minimum_delay_minutes, min(self.maximum_delay_minutes, minutes))
 
     async def schedule_event(self, event: dict, state: dict) -> dict:
-        """Ask once whether a newly written event deserves a later follow-up."""
+        """Keep a new write in the current cycle; do not schedule a push yet.
+
+        A push is considered only after the user-defined 30-minute no-action
+        threshold has actually been crossed.  Scheduling at write time created
+        a second, legacy delivery path that could race the silence-entry path.
+        """
         if not self.enabled or event.get("status") != "applied":
             return {"status": "ignored"}
-        contexts = list(state.get("event_contexts") or [])
-        if not contexts and event.get("context_card"):
-            contexts = [{"context_card": event["context_card"]}]
-        has_follow_up = self._has_unresolved_follow_up(contexts)
-        hormone_name, hormone_drive = self._hormone_drive(state.get("pipes", {}))
-        moment = beijing_now()
-        try:
-            tendency_context = await self._tendency_context()
-            decision = await self.evaluator.behavior_schedule(
-                event_contexts=contexts,
-                pipes=state.get("pipes", {}),
-                tendency_context=tendency_context,
-            )
-            follow_up = bool(decision.get("follow_up", False))
-            delay = self._delay(decision.get("delay_minutes"))
-            reason = str(decision.get("reason", "")).strip()
-        except Exception as error:
-            logger.warning("Behavior scheduling failed: %s", error)
-            return {"status": "failed", "error": str(error)}
-        linked_follow_up = (
-            has_follow_up and hormone_drive >= self.follow_up_hormone_threshold
-        )
-        if linked_follow_up:
-            follow_up = True
-            if hormone_drive >= 0.70:
-                delay = min(delay, 15)
-            elif hormone_drive >= 0.40:
-                delay = min(delay, 30)
-            reason = (
-                f"未完事件与激素联动：{hormone_name}={hormone_drive:.2f}"
-                + (f"；{reason}" if reason else "")
-            )
-        elif (
-            not follow_up
-            and contexts
-            and not self._has_closed_follow_up(contexts)
-            and hormone_drive >= self.schedule_recheck_hormone_threshold
-        ):
-            # The first call is only a gate. Keep a high-emotion, still-open
-            # event for one full behavior_decision pass instead of letting a
-            # conservative schedule answer permanently discard it.
-            follow_up = True
-            reason = (
-                f"情绪驱动较高，保留一次到点复核：{hormone_name}={hormone_drive:.2f}"
-                + (f"；{reason}" if reason else "")
-            )
-        due_at = moment + timedelta(minutes=delay)
-        candidate = await self.store.upsert_candidate(
-            {
-                "cycle_id": int(event.get("cycle_id", state.get("cycle_id", 0))),
-                "source_event_id": int(event["event_id"]),
-                "created_at": moment.isoformat(timespec="seconds"),
-                "due_at": due_at.isoformat(timespec="seconds"),
-                "expires_at": (due_at + timedelta(hours=8)).isoformat(timespec="seconds"),
-                "status": "pending" if follow_up else "skipped",
-                "event_contexts": contexts,
-                "follow_up_required": linked_follow_up,
-                "hormone_name": hormone_name,
-                "hormone_drive": hormone_drive,
-                "decision_note": reason or (
-                    "等待到点复核" if follow_up else "事件不需要后续主动联系"
-                ),
-                "decision_context": {
-                    "phase": "legacy_event_schedule",
-                    "emotion_drivers": self._top_pipe_drivers(state.get("pipes", {})),
-                    "pipe_count": len(state.get("pipes", {}) or {}),
-                },
-            }
-        )
-        return {"status": candidate["status"], "item": candidate}
+        return {
+            "status": "deferred",
+            "reason": "新写入已并入本轮上下文；仅在30分钟无操作后进入静默时再判断推送",
+        }
 
     async def process_due(
         self,
@@ -499,6 +455,11 @@ class BehaviorService:
     ) -> list[dict]:
         """Re-evaluate due event candidates independently from darkflow timing."""
         if not self.enabled:
+            return []
+        if not state.get("silence_eligible"):
+            cycle_id = int(state.get("cycle_id") or 0)
+            if cycle_id > 0:
+                await self.store.cancel_cycle(cycle_id)
             return []
         if state.get("interaction_phase") == "silence":
             return []
@@ -510,6 +471,14 @@ class BehaviorService:
         for candidate in candidates:
             candidate_id = int(candidate["candidate_id"])
             decision_context = dict(candidate.get("decision_context") or {})
+            if decision_context.get("phase") != "silence_entry":
+                await self.store.update_candidate(
+                    candidate_id,
+                    "cancelled",
+                    "旧写入时预排队已停用；只在真实静默入口判断推送",
+                )
+                results.append({"status": "cancelled", "candidate_id": candidate_id})
+                continue
             if self._in_quiet_hours(moment):
                 due_at = self._quiet_release_at(moment, candidate_id)
                 await self.store.update_candidate(
@@ -554,6 +523,44 @@ class BehaviorService:
                 if str(item.get("context_card", "")) not in seen
             )
             try:
+                memory_resonance = list(
+                    (darkflow or {}).get("memory_resonance") or []
+                )
+                if self.memory_resonance_provider is not None:
+                    try:
+                        recalled = self.memory_resonance_provider(
+                            state, event_contexts
+                        )
+                        if hasattr(recalled, "__await__"):
+                            recalled = await recalled
+                        seen_recall = {
+                            (
+                                str(item.get("source", "")),
+                                str(
+                                    item.get("message_id")
+                                    or item.get("bucket_id")
+                                    or item.get("excerpt", "")
+                                ),
+                            )
+                            for item in memory_resonance
+                        }
+                        for item in recalled or []:
+                            identity = (
+                                str(item.get("source", "")),
+                                str(
+                                    item.get("message_id")
+                                    or item.get("bucket_id")
+                                    or item.get("excerpt", "")
+                                ),
+                            )
+                            if identity not in seen_recall:
+                                memory_resonance.append(item)
+                                seen_recall.add(identity)
+                    except Exception as error:
+                        logger.warning(
+                            "Push memory resonance unavailable: %s", error
+                        )
+                memory_resonance = memory_resonance[:4]
                 current_hormone_name, current_hormone_drive = self._hormone_drive(
                     state.get("pipes", {})
                 )
@@ -583,8 +590,14 @@ class BehaviorService:
                         "current_name": current_hormone_name,
                         "current_drive": current_hormone_drive,
                     },
-                    "memory_resonance": list((darkflow or {}).get("memory_resonance") or []),
+                    "memory_resonance": memory_resonance,
+                    "push_history": decision_context.get("previous_pushes", []),
+                    "push_sequence": decision_context.get("push_sequence", 1),
+                    "last_push_acknowledged": decision_context.get(
+                        "last_push_acknowledged", False
+                    ),
                     "emotion_drivers": decision_context.get("emotion_drivers", []),
+                    "relationship_context": state.get("relationship", {}),
                 }, state)
             except Exception as error:
                 logger.warning("Due behavior decision failed: %s", error)
@@ -679,6 +692,7 @@ class BehaviorService:
                             "pipe_count", len(state.get("pipes", {}) or {})
                         ),
                         "phase": decision_context.get("phase", "absence"),
+                        "push_sequence": decision_context.get("push_sequence", 1),
                     },
                 }
             )
@@ -733,6 +747,7 @@ class BehaviorService:
                     "interaction_phase": phase,
                 },
                 "memory_resonance": list(darkflow.get("memory_resonance") or []),
+                "relationship_context": state.get("relationship", {}),
             }, state)
             messages = self._decision_messages(decision, state.get("pipes", {}))
             content = "\n---\n".join(messages)
@@ -826,21 +841,68 @@ class BehaviorService:
             return {"status": "failed", "error": str(error)}
 
     async def process_silence_nudge(self, state: dict) -> dict:
-        """Create one idempotent push decision exactly when true silence begins."""
+        """Create a throttled push decision during one true silence cycle.
+
+        Silence remains open after a push. A later decision is allowed after a
+        quiet interval, whether or not the previous push was acknowledged. The
+        acknowledgement itself never changes the xinchao cycle.
+        """
         if not self.enabled:
             return {"status": "disabled"}
+        if not state.get("silence_eligible"):
+            return {
+                "status": "waiting",
+                "phase": "active",
+                "reason": "mailbox_write_required",
+            }
         if state.get("interaction_phase") != "absence":
             return {"status": "waiting", "phase": "active"}
         cycle_id = int(state.get("cycle_id") or 0)
         if cycle_id <= 0:
             return {"status": "idle"}
-        existing = await self.store.candidate_for_cycle(cycle_id)
+        progress = await self.store.silence_progress(cycle_id)
+        existing = progress.get("latest_candidate")
+        if existing and str(existing.get("status")) not in {"pending", "waiting"}:
+            existing = None
         if existing:
             return {"status": "duplicate", "item": existing}
 
+        latest_candidate = progress.get("latest_candidate") or {}
+        last_attempt_at = str(latest_candidate.get("updated_at") or "")
+        push_history = list(progress.get("push_history") or [])
+        if push_history:
+            last_push = push_history[-1]
+            last_attempt_at = max(
+                last_attempt_at,
+                str(
+                    last_push.get("delivered_at")
+                    or last_push.get("decided_at")
+                    or ""
+                ),
+            )
+        if last_attempt_at:
+            try:
+                elapsed = (
+                    beijing_now() - datetime.fromisoformat(last_attempt_at)
+                ).total_seconds()
+                last_attempt = datetime.fromisoformat(last_attempt_at)
+            except (TypeError, ValueError):
+                elapsed = self.follow_up_delay_minutes * 60
+                last_attempt = beijing_now()
+            if elapsed < self.follow_up_delay_minutes * 60:
+                next_push_at = last_attempt + timedelta(
+                    minutes=self.follow_up_delay_minutes
+                )
+                return {
+                    "status": "waiting",
+                    "phase": "absence",
+                    "reason": "上一条推送后仍未达到下一次判断间隔",
+                    "next_push_at": next_push_at.isoformat(timespec="seconds"),
+                }
+
         # Clear any legacy candidate that may have been scheduled immediately
         # after a write.  The silence-entry decision below is the only push
-        # decision allowed for this interaction cycle.
+        # decision family allowed for this interaction cycle.
         await self.store.cancel_cycle(cycle_id)
 
         moment = beijing_now()
@@ -855,10 +917,28 @@ class BehaviorService:
                 or ""
             ).strip()
         hormone_name, hormone_drive = self._hormone_drive(state.get("pipes", {}))
+        push_sequence = int(progress.get("candidate_count") or 0) + 1
+        source_event_id = (
+            -abs(cycle_id)
+            if push_sequence == 1
+            else -(abs(cycle_id) * 1_000_000 + push_sequence)
+        )
+        history_for_model = []
+        for item in push_history:
+            context = item.get("context") or {}
+            history_for_model.append(
+                {
+                    "sequence": context.get("push_sequence") or len(history_for_model) + 1,
+                    "sent_at": item.get("delivered_at") or item.get("decided_at"),
+                    "acknowledged": bool(item.get("acknowledged_at")),
+                    "acknowledged_at": item.get("acknowledged_at"),
+                    "content": str(item.get("content") or "")[:240],
+                }
+            )
         candidate = await self.store.upsert_candidate(
             {
                 "cycle_id": cycle_id,
-                "source_event_id": -abs(cycle_id),
+                "source_event_id": source_event_id,
                 "created_at": state.get("absence_started_at")
                 or moment.isoformat(timespec="seconds"),
                 "due_at": moment.isoformat(timespec="seconds"),
@@ -884,6 +964,12 @@ class BehaviorService:
                         state.get("pipes", {})
                     ),
                     "pipe_count": len(state.get("pipes", {}) or {}),
+                    "push_sequence": push_sequence,
+                    "previous_pushes": history_for_model,
+                    "last_push_acknowledged": bool(
+                        history_for_model
+                        and history_for_model[-1].get("acknowledged")
+                    ),
                 },
             }
         )

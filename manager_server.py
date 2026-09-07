@@ -16,7 +16,9 @@ import zipfile
 from datetime import datetime
 from pathlib import Path
 from typing import Literal
+from urllib.parse import quote, urlsplit
 
+import httpx
 import pyzipper
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse
@@ -84,6 +86,285 @@ house_phrase_cache: dict[str, object] = {
     "expires_at": 0.0,
     "generated": False,
 }
+
+NURSERY_PROXY_MAX_BODY_BYTES = 64 * 1024
+NURSERY_PROXY_MAX_RESPONSE_BYTES = 1024 * 1024
+
+
+def _nursery_brain_settings() -> tuple[str, str]:
+    base_url = os.environ.get(
+        "OMBRE_BRAIN_INTERNAL_URL", "http://ombre-brain:8000"
+    ).strip().rstrip("/")
+    token = os.environ.get("OMBRE_NURSERY_INTERNAL_TOKEN", "").strip()
+    parsed = urlsplit(base_url)
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.hostname
+        or parsed.username
+        or parsed.password
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise HTTPException(status_code=503, detail="养育室内部服务地址尚未正确配置。")
+    if len(token) < 32:
+        raise HTTPException(status_code=503, detail="养育室内部服务认证尚未配置。")
+    return base_url, token
+
+
+def _new_nursery_proxy_client() -> httpx.AsyncClient:
+    return httpx.AsyncClient(timeout=125.0, follow_redirects=False)
+
+
+async def _proxy_nursery_request(request: Request, internal_path: str) -> JSONResponse:
+    """Proxy an authenticated user request without opening nursery storage."""
+
+    base_url, token = _nursery_brain_settings()
+    declared = request.headers.get("content-length", "").strip()
+    if declared:
+        try:
+            if int(declared) > NURSERY_PROXY_MAX_BODY_BYTES:
+                raise HTTPException(status_code=413, detail="请求内容过大。")
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="请求长度无效。") from exc
+    body = await request.body() if request.method != "GET" else b""
+    if len(body) > NURSERY_PROXY_MAX_BODY_BYTES:
+        raise HTTPException(status_code=413, detail="请求内容过大。")
+    headers = {
+        "x-anima-internal-token": token,
+        "accept": "application/json",
+    }
+    if body:
+        headers["content-type"] = "application/json"
+    request_id = request.headers.get("x-request-id", "").strip()
+    if request_id:
+        headers["x-request-id"] = request_id[:200]
+    try:
+        async with _new_nursery_proxy_client() as client:
+            response = await client.request(
+                request.method,
+                f"{base_url}{internal_path}",
+                headers=headers,
+                params=request.query_params if request.method == "GET" else None,
+                content=body,
+            )
+    except httpx.HTTPError:
+        return JSONResponse(
+            {
+                "ok": False,
+                "error": {
+                    "code": "NURSERY_SERVICE_UNAVAILABLE",
+                    "message": "养育室服务暂时无法连接，已保存的数据没有改变。",
+                },
+            },
+            status_code=503,
+        )
+    if len(response.content) > NURSERY_PROXY_MAX_RESPONSE_BYTES:
+        return JSONResponse(
+            {
+                "ok": False,
+                "error": {
+                    "code": "NURSERY_RESPONSE_TOO_LARGE",
+                    "message": "养育室服务返回异常，已保存的数据没有改变。",
+                },
+            },
+            status_code=502,
+        )
+    try:
+        payload = response.json()
+    except ValueError:
+        payload = {
+            "ok": False,
+            "error": {
+                "code": "NURSERY_INVALID_RESPONSE",
+                "message": "养育室服务返回了无效结果，已保存的数据没有改变。",
+            },
+        }
+        return JSONResponse(payload, status_code=502)
+    return JSONResponse(payload, status_code=response.status_code)
+
+
+async def _post_nursery_lifecycle(
+    internal_path: str, payload: dict
+) -> str:
+    """Best-effort private lifecycle call; never affects Anima's write path."""
+
+    try:
+        base_url, token = _nursery_brain_settings()
+        async with httpx.AsyncClient(timeout=5.0, follow_redirects=False) as client:
+            response = await client.post(
+                f"{base_url}{internal_path}",
+                headers={
+                    "x-anima-internal-token": token,
+                    "accept": "application/json",
+                    "content-type": "application/json",
+                },
+                json=payload,
+            )
+        try:
+            response_payload = response.json()
+        except ValueError:
+            response_payload = {}
+        error = response_payload.get("error", {}) if isinstance(response_payload, dict) else {}
+        code = str(error.get("code") or "").strip()
+        if 200 <= response.status_code < 300 and response_payload.get("ok") is True:
+            return ""
+        if code != "SOURCE_NOT_FOUND":
+            logger.warning(
+                "Nursery lifecycle %s failed: %s",
+                internal_path,
+                code or f"HTTP {response.status_code}",
+            )
+        return code
+    except Exception as error:
+        logger.warning("Nursery lifecycle %s unavailable: %s", internal_path, error)
+        return ""
+
+
+def _anima_nursery_reference(value: object, expected_source_key: str) -> dict | None:
+    """Keep only opaque provenance from Xinchao's dedicated safe export."""
+
+    if not isinstance(value, dict):
+        return None
+    source_key = str(value.get("source_key") or "").strip()
+    source_version = str(value.get("source_version") or "").strip()
+    if source_key != str(expected_source_key).strip() or not source_version:
+        return None
+    return {"source_key": source_key, "source_version": source_version}
+
+
+async def _anima_nursery_references(source_key: str) -> list[dict]:
+    """Read Xinchao's opaque safe provenance, never a source body."""
+
+    try:
+        references = await asyncio.to_thread(
+            xinchao_service.child_safe_source_references_for_nursery, source_key
+        )
+    except Exception as error:
+        logger.warning("Mailbox nursery provenance lookup failed: %s", error)
+        return []
+    return [
+        reference
+        for value in references
+        if (reference := _anima_nursery_reference(value, source_key)) is not None
+    ]
+
+
+async def _mailbox_nursery_references(message_id: int) -> list[dict]:
+    return await _anima_nursery_references(f"mailbox:{int(message_id)}")
+
+
+async def _memory_nursery_references(bucket_id: str) -> list[dict]:
+    return await _anima_nursery_references(f"memory:{str(bucket_id).strip()}")
+
+
+async def _bridge_anima_nursery_event_once(
+    xinchao_result: dict,
+    *,
+    source_key: str,
+    previous_references: list[dict] | None = None,
+) -> None:
+    """Mirror only a completed, child-safe Anima event into nursery."""
+
+    if not isinstance(xinchao_result, dict) or xinchao_result.get("status") != "applied":
+        return
+    try:
+        event_id = int(xinchao_result.get("event_id") or 0)
+        created_at = str(xinchao_result.get("created_at") or "").strip()
+        replacement_version = f"{created_at}#{event_id}"[:80]
+        if event_id <= 0 or not created_at:
+            logger.warning("Completed Anima Xinchao event has no safe provenance")
+            return
+        safe_event = await asyncio.to_thread(
+            xinchao_service.child_safe_event_for_nursery, event_id
+        )
+    except Exception as error:
+        logger.warning("Anima nursery event export failed: %s", error)
+        return
+
+    event = {
+        key: safe_event.get(key)
+        for key in (
+            "source_key",
+            "source_version",
+            "category",
+            "child_safe_summary",
+            "occurred_at",
+        )
+    } if isinstance(safe_event, dict) else None
+    if event is not None and _anima_nursery_reference(event, source_key) is None:
+        logger.warning("Anima nursery event export was not a safe source envelope")
+        event = None
+
+    for reference in previous_references or []:
+        previous = _anima_nursery_reference(reference, source_key)
+        if previous is None:
+            continue
+        if event is None:
+            await _post_nursery_lifecycle(
+                "/internal/nursery/anima/family-events/revoke", previous
+            )
+        else:
+            await _post_nursery_lifecycle(
+                "/internal/nursery/anima/family-events/supersede",
+                {
+                    **previous,
+                    "superseded_by_source_version": replacement_version,
+                },
+            )
+    if event is None:
+        return
+    await _post_nursery_lifecycle(
+        "/internal/nursery/anima/family-events", {"event": event}
+    )
+
+
+async def _bridge_anima_nursery_event(
+    xinchao_result: dict,
+    *,
+    source_key: str,
+    previous_references: list[dict] | None = None,
+) -> None:
+    """Contain all optional nursery failures outside Anima's primary path."""
+
+    try:
+        await _bridge_anima_nursery_event_once(
+            xinchao_result,
+            source_key=source_key,
+            previous_references=previous_references,
+        )
+    except Exception as error:
+        logger.warning("Anima nursery lifecycle bridge failed: %s", error)
+
+
+async def _revoke_anima_nursery_events(source_key: str) -> None:
+    """Best-effort revoke of every exported safe source version."""
+
+    try:
+        for reference in await _anima_nursery_references(source_key):
+            await _post_nursery_lifecycle(
+                "/internal/nursery/anima/family-events/revoke", reference
+            )
+    except Exception as error:
+        logger.warning("Anima nursery revoke bridge failed: %s", error)
+
+
+async def _revoke_mailbox_nursery_events(message_id: int) -> None:
+    await _revoke_anima_nursery_events(f"mailbox:{int(message_id)}")
+
+
+async def _revoke_memory_nursery_events(bucket_id: str) -> None:
+    await _revoke_anima_nursery_events(f"memory:{str(bucket_id).strip()}")
+
+
+async def _revoke_expired_mailbox_nursery_events(message_ids: list[int]) -> None:
+    try:
+        for message_id in message_ids:
+            await _revoke_mailbox_nursery_events(message_id)
+    except Exception as error:
+        logger.warning("Expired mailbox nursery revoke bridge failed: %s", error)
+
+
+mailbox_store.set_expiry_listener(_revoke_expired_mailbox_nursery_events)
 
 
 def _clean_house_phrase(raw: str) -> str:
@@ -317,6 +598,7 @@ async def require_manager_login(request: Request, call_next):
         request.method in {"POST", "PUT", "PATCH", "DELETE"}
         and path.startswith("/api/")
         and not path.startswith("/api/auth/")
+        and path != "/api/behavior/acknowledge"
         and response.status_code < 400
     ):
         try:
@@ -452,6 +734,8 @@ async def _record_sidecars(
     source_ref: str,
     *,
     correction_key: str = "",
+    previous_mailbox_references: list[dict] | None = None,
+    previous_memory_references: list[dict] | None = None,
 ) -> None:
     event_key = hashlib.sha256(
         f"{source_tool}\0{source_ref}\0{' '.join(content.split())}".encode("utf-8")
@@ -481,6 +765,18 @@ async def _record_sidecars(
         )
     except Exception as error:
         logger.warning("Manager fact hook failed after successful write: %s", error)
+    if source_tool == "mailbox":
+        await _bridge_anima_nursery_event(
+            xinchao_result,
+            source_key=f"mailbox:{int(source_ref)}",
+            previous_references=previous_mailbox_references,
+        )
+    elif source_tool in {"manager_memory", "manager_append", "manager_create"}:
+        await _bridge_anima_nursery_event(
+            xinchao_result,
+            source_key=f"memory:{source_ref}",
+            previous_references=previous_memory_references,
+        )
 
 
 async def _xinchao_memory_resonance_provider(
@@ -700,7 +996,7 @@ class TaskUpdate(BaseModel):
     title: str | None = Field(default=None, min_length=1, max_length=160)
     details: str | None = Field(default=None, max_length=4000)
     importance: int | None = Field(default=None, ge=1, le=5)
-    status: Literal["open", "completed", "cancelled"] | None = None
+    status: Literal["planned", "in_progress", "waiting", "completed"] | None = None
 
 
 class TaskDeleteRequest(BaseModel):
@@ -721,6 +1017,11 @@ class BehaviorAcknowledgeRequest(BaseModel):
 
 class BehaviorSettingsUpdate(BaseModel):
     push_title: str = Field(min_length=1, max_length=60)
+
+
+class RelationshipOverrideRequest(BaseModel):
+    value: float = Field(ge=0, le=200)
+    reason: str = Field(default="", max_length=240)
 
 
 class JudgeRelation(BaseModel):
@@ -840,6 +1141,72 @@ async def _all_buckets() -> list[dict]:
 @app.get("/api/health")
 async def health() -> dict:
     return {"status": "ok", "service": "Clio Manager"}
+
+
+@app.get("/api/nursery/status")
+async def nursery_status(request: Request) -> JSONResponse:
+    return await _proxy_nursery_request(request, "/internal/nursery/user/status")
+
+
+@app.get("/api/nursery/entry-preference")
+@app.put("/api/nursery/entry-preference")
+async def nursery_entry_preference(request: Request) -> JSONResponse:
+    return await _proxy_nursery_request(
+        request, "/internal/nursery/user/entry-preference"
+    )
+
+
+@app.post("/api/nursery/drafts")
+async def nursery_start_draft(request: Request) -> JSONResponse:
+    return await _proxy_nursery_request(request, "/internal/nursery/user/drafts")
+
+
+@app.get("/api/nursery/drafts/{child_id}")
+async def nursery_creation_draft(request: Request, child_id: str) -> JSONResponse:
+    target = quote(str(child_id).strip(), safe="")
+    return await _proxy_nursery_request(
+        request, f"/internal/nursery/user/drafts/{target}"
+    )
+
+
+@app.post("/api/nursery/drafts/{child_id}/operations")
+async def nursery_creation_operation(request: Request, child_id: str) -> JSONResponse:
+    target = quote(str(child_id).strip(), safe="")
+    return await _proxy_nursery_request(
+        request, f"/internal/nursery/user/drafts/{target}/operations"
+    )
+
+
+@app.get("/api/nursery/operations/{operation_id}")
+async def nursery_operation_result(request: Request, operation_id: str) -> JSONResponse:
+    target = quote(str(operation_id).strip(), safe="")
+    return await _proxy_nursery_request(
+        request, f"/internal/nursery/user/operations/{target}"
+    )
+
+
+@app.post("/api/nursery/children/{child_id}/interactions")
+async def nursery_child_interaction(request: Request, child_id: str) -> JSONResponse:
+    target = quote(str(child_id).strip(), safe="")
+    return await _proxy_nursery_request(
+        request, f"/internal/nursery/user/children/{target}/interactions"
+    )
+
+
+@app.get("/api/nursery/children/{child_id}/status")
+async def nursery_child_status(request: Request, child_id: str) -> JSONResponse:
+    target = quote(str(child_id).strip(), safe="")
+    return await _proxy_nursery_request(
+        request, f"/internal/nursery/user/children/{target}/status"
+    )
+
+
+@app.post("/api/nursery/children/{child_id}/operations")
+async def nursery_child_operation(request: Request, child_id: str) -> JSONResponse:
+    target = quote(str(child_id).strip(), safe="")
+    return await _proxy_nursery_request(
+        request, f"/internal/nursery/user/children/{target}/operations"
+    )
 
 
 @app.get("/api/vault-health")
@@ -1053,6 +1420,9 @@ async def update_bucket(bucket_id: str, payload: BucketUpdate) -> dict:
         success = await bucket_manager.update(bucket_id, **updates)
     if not success:
         raise HTTPException(status_code=409, detail="修改未完成；原记忆没有变化。")
+    previous_memory_references = None
+    if payload.content is not None and "content" in updates and not xinchao_content:
+        previous_memory_references = await _memory_nursery_references(bucket_id)
     if xinchao_content:
         await _record_sidecars(xinchao_content, "manager_append", bucket_id)
     elif payload.content is not None and "content" in updates:
@@ -1061,6 +1431,7 @@ async def update_bucket(bucket_id: str, payload: BucketUpdate) -> dict:
             "manager_memory",
             bucket_id,
             correction_key=f"memory:{bucket_id}",
+            previous_memory_references=previous_memory_references,
         )
     return {"ok": True}
 
@@ -1074,6 +1445,7 @@ async def delete_bucket(bucket_id: str, payload: DeleteRequest) -> dict:
     if not success:
         raise HTTPException(status_code=404, detail="找不到这条记忆，或快照保存失败。")
     await topic_store.remove(bucket_id)
+    await _revoke_memory_nursery_events(bucket_id)
     return {"ok": True, "snapshot_created": True}
 
 
@@ -1111,6 +1483,7 @@ async def permanently_delete_bucket(
             detail="附属记录已清理，但正文文件删除失败，请立即检查服务器。",
         )
     topic_preview_cache.clear()
+    await _revoke_memory_nursery_events(bucket_id)
     return {
         "ok": True,
         "snapshot_created": False,
@@ -1691,11 +2064,13 @@ async def update_mailbox_message(
         result = await mailbox_store.update(message_id, payload.message)
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
+    previous_references = await _mailbox_nursery_references(message_id)
     await _record_sidecars(
         payload.message,
         "mailbox",
         str(message_id),
         correction_key=f"mailbox:{message_id}",
+        previous_mailbox_references=previous_references,
     )
     return {"ok": True, "snapshot_created": True, "item": result}
 
@@ -1710,6 +2085,7 @@ async def delete_mailbox_message(
         result = await mailbox_store.delete(message_id)
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
+    await _revoke_mailbox_nursery_events(message_id)
     return {"ok": True, "snapshot_created": True, "item": result}
 
 
@@ -1733,6 +2109,26 @@ async def xinchao_status() -> dict:
     """Read the current hormone state without consuming or resetting it."""
     state = await xinchao_service.status()
     return {"display_name": "激素", **state}
+
+
+@app.get("/api/xinchao/relationship")
+async def xinchao_relationship() -> dict:
+    """Read the explainable 0-200 current relationship climate."""
+    return await xinchao_service.relationship_status()
+
+
+@app.put("/api/xinchao/relationship")
+async def set_xinchao_relationship(payload: RelationshipOverrideRequest) -> dict:
+    """Temporarily calibrate the current moment without rewriting history."""
+    return await xinchao_service.set_relationship_override(
+        payload.value, payload.reason
+    )
+
+
+@app.post("/api/xinchao/relationship/restore")
+async def restore_xinchao_relationship() -> dict:
+    """Release a current-only calibration and return to automatic judgement."""
+    return await xinchao_service.restore_relationship_auto()
 
 
 @app.get("/api/house/phrase")
@@ -1868,6 +2264,21 @@ async def xinchao_resonance() -> dict:
     )[:3]
     labels = [name for name, value in strongest if float(value) >= 0.2]
     items = []
+    recent_links = await xinchao_service.recent_linkages(limit=30)
+    for link in recent_links:
+        echo = link.get("memory_echo") or {}
+        if not echo:
+            continue
+        items.append(
+            {
+                **echo,
+                "score": round(float(echo.get("relevance") or 0.0), 4),
+                "why": "这次写入唤起了相似记忆，形成一次较轻的记忆回响",
+                "event_id": link.get("event_id"),
+                "created_at": link.get("created_at"),
+                "trigger": link.get("summary") or link.get("evidence") or "一次写入",
+            }
+        )
     for raw in (darkflow or {}).get("memory_resonance", []):
         item = dict(raw)
         score = item.get("similarity", item.get("relevance", 0.0))
@@ -1878,10 +2289,18 @@ async def xinchao_resonance() -> dict:
         if labels:
             reasons.append("此刻较强的感受：" + "、".join(labels))
         item["why"] = "；".join(reasons) or "与本轮事件产生联系"
-        items.append(item)
+        if not any(
+            str(existing.get("source_id") or "")
+            == str(item.get("bucket_id") or item.get("message_id") or "")
+            for existing in items
+        ):
+            items.append(item)
     tension = await xinchao_tension()
     return {
-        "items": items,
+        "name": "内在牵引",
+        "item_label": "记忆回响",
+        "items": items[:12],
+        "links": items[:12],
         "count": len(items),
         "as_of": state.get("as_of"),
         "tension": tension,
@@ -2087,7 +2506,7 @@ async def toolbox() -> dict:
             {"id": "darkflow", "name": "暗涌", "description": "沉默期间形成的一封内心沉淀", "icon": "waves"},
             {"id": "thoughts", "name": "念痕", "description": "当前 AI 留下的真实当下", "icon": "feather"},
             {"id": "mind", "name": "心念", "description": "沉默中浮现的闪念与执念", "icon": "sparkles"},
-            {"id": "resonance", "name": "共振与张力", "description": "查看记忆与此刻怎样相互牵动", "icon": "radio"},
+            {"id": "resonance", "name": "内在牵引", "description": "查看一次写入怎样唤起较轻的记忆回响", "icon": "radio"},
             {"id": "behavior", "name": "行为与推送", "description": "查看推送判断和送达状态", "icon": "send"},
             {"id": "personality", "name": "性格轨迹", "description": "查看本月倾向怎样形成", "icon": "route"},
             {"id": "coordinates", "name": "认知脉络", "description": "汇合时间、关系、事实、情绪与沉淀", "icon": "network"},
@@ -2242,43 +2661,13 @@ async def acknowledge_behavior(
     )
     if acknowledged.get("status") == "empty":
         return {"status": "empty", "message": "当前没有等待确认的推送。"}
-    silence_ids = acknowledged.get("silence_action_ids", [])
-    stateful_ids = acknowledged.get("stateful_action_ids", [])
-    if silence_ids:
-        await behavior_service.store.purge_handoff(
-            silence_ids
-        )
-    if not stateful_ids:
-        state = await xinchao_service.observe_presence(
-            session_id="manager",
-            source="manager:behavior_acknowledge",
-            event_id=str(acknowledged.get("acknowledged_at") or ""),
-            start_cycle=True,
-            interrupt_silence=True,
-        )
-        await behavior_service.store.cancel_for_activity(
-            int(state.get("previous_cycle_id", state.get("cycle_id", 0)) or 0)
-        )
-        return {
-            "status": "acknowledged",
-            "phase": acknowledged.get("phase") or "silence",
-            "message": "已经清掉旧版沉默提醒；它不会影响激素、心念或暗涌。",
-            "acknowledged_at": acknowledged.get("acknowledged_at"),
-            "count": acknowledged.get("count", 0),
-            "active_started_at": state.get("active_started_at"),
-        }
-
-    state = await xinchao_service.acknowledge_seen()
-    await behavior_service.store.purge_cycle_candidates(
-        acknowledged.get("stateful_cycle_ids", [])
-    )
     return {
         "status": "acknowledged",
-        "phase": "absence",
-        "message": "已经一次告诉他：这些推送你都看到了。想念和靠近会缓下来一点，其他感受仍然保留；不会另开沉默倒计时。",
+        "phase": acknowledged.get("phase") or "silence",
+        "message": "已确认这条推送；确认本身不算继续聊天，不更新活动时间，不新开周期，也不清除暗涌状态。记录会保留到 AI 成功读完开机摘要后再清理。",
         "acknowledged_at": acknowledged.get("acknowledged_at"),
         "count": acknowledged.get("count", 0),
-        "active_started_at": state.get("active_started_at"),
+        "active_started_at": None,
     }
 
 

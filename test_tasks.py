@@ -34,7 +34,7 @@ class TaskTests(unittest.IsolatedAsyncioTestCase):
             "buckets_dir": self.temp.name,
             "tasks": {
                 "enabled": True,
-                "auto_extract": True,
+                "auto_extract": False,
                 "db_path": str(Path(self.temp.name) / "tasks.sqlite3"),
                 "semantic_threshold": 0.78,
                 "exact_dedupe_minutes": 10,
@@ -48,11 +48,12 @@ class TaskTests(unittest.IsolatedAsyncioTestCase):
         service = ScriptedTaskService(self.config, [])
         item = await service.create_manual("续费服务器", "到期前处理", 5)
         self.assertEqual(item["importance"], 5)
+        self.assertEqual(item["status"], "planned")
         self.assertEqual((await service.store.counts())["open"], 1)
         matches = await service.search("服务器续费", status="open")
         self.assertEqual(matches[0]["task_id"], item["task_id"])
 
-    async def test_same_event_is_processed_once(self):
+    async def test_narrative_writes_never_auto_create_tasks(self):
         service = ScriptedTaskService(
             self.config,
             [[{"action": "create", "title": "交材料", "importance": 4,
@@ -60,53 +61,37 @@ class TaskTests(unittest.IsolatedAsyncioTestCase):
         )
         first = await service.process_event("明天要交材料", "hold", "abc", "session:1")
         second = await service.process_event("明天要交材料", "mailbox", "9", "session:1")
-        self.assertEqual(first["status"], "applied")
-        self.assertEqual(second["status"], "duplicate")
-        self.assertEqual((await service.store.counts())["total"], 1)
+        self.assertEqual(first["status"], "disabled")
+        self.assertEqual(second["status"], "disabled")
+        self.assertEqual(first["reason"], "current_ai_or_user_only")
+        self.assertEqual((await service.store.counts())["total"], 0)
+        self.assertEqual(len(service.scripts), 1)
 
-    async def test_completion_notice_is_one_time(self):
-        service = ScriptedTaskService(
-            self.config,
-            [
-                [{"action": "create", "title": "拿快递", "importance": 3,
-                  "task_type": "finite_action", "completion_criterion": "快递已领取"}],
-                [{"action": "complete", "task_id": 1, "evidence": "已经拿到了"}],
-            ],
-        )
-        await service.process_event("还要去拿快递", "mailbox", "1", "event:1")
-        await service.process_event("快递已经拿到了", "mailbox", "2", "event:2")
+    async def test_manual_completion_notice_is_one_time(self):
+        service = ScriptedTaskService(self.config, [])
+        item = await service.create_manual("拿快递", "快递已领取后完成", 3)
+        await service.update_manual(item["task_id"], status="completed")
         pending = await service.store.pending_completions()
         self.assertEqual([item["task_id"] for item in pending], [1])
         await service.store.mark_completions_delivered([1])
         self.assertEqual(await service.store.pending_completions(), [])
 
-    async def test_manual_state_has_history_and_old_event_cannot_reopen(self):
-        service = ScriptedTaskService(
-            self.config,
-            [[{"action": "create", "title": "预约检查", "importance": 4,
-               "task_type": "finite_action", "completion_criterion": "检查时间已预约"}]],
-        )
-        await service.process_event("要预约检查", "hold", "a", "event:old")
-        await service.update_manual(1, status="completed")
-        repeated = await service.process_event("要预约检查", "hold", "a", "event:old")
-        self.assertEqual(repeated["status"], "duplicate")
-        self.assertEqual((await service.store.get(1))["status"], "completed")
-        history = await service.store.history(1)
-        self.assertEqual(history[0]["status"], "open")
+    async def test_manual_state_has_history_and_writes_cannot_reopen(self):
+        service = ScriptedTaskService(self.config, [])
+        item = await service.create_manual("预约检查", "检查时间已预约", 4)
+        await service.update_manual(item["task_id"], status="completed")
+        repeated = await service.process_event("检查改期，需要重新预约", "mailbox", "b", "event:new")
+        self.assertEqual(repeated["status"], "disabled")
+        self.assertEqual((await service.store.get(item["task_id"]))["status"], "completed")
+        history = await service.store.history(item["task_id"])
+        self.assertEqual(history[0]["workflow_state"], "planned")
 
-    async def test_explicit_new_event_can_reopen(self):
-        service = ScriptedTaskService(
-            self.config,
-            [
-                [{"action": "create", "title": "预约检查", "importance": 4,
-                  "task_type": "finite_action", "completion_criterion": "检查时间已预约"}],
-                [{"action": "reopen", "task_id": 1, "evidence": "需要重新预约"}],
-            ],
-        )
-        await service.process_event("要预约检查", "hold", "a", "event:1")
-        await service.update_manual(1, status="completed")
-        await service.process_event("检查改期，需要重新预约", "mailbox", "b", "event:2")
-        self.assertEqual((await service.store.get(1))["status"], "open")
+    async def test_current_ai_can_reopen_and_move_through_four_states(self):
+        service = ScriptedTaskService(self.config, [])
+        item = await service.create_manual("预约检查", "检查时间已预约", 4, source="mcp:tasks")
+        for state in ("in_progress", "waiting", "completed", "planned"):
+            updated = await service.update_manual(item["task_id"], status=state)
+            self.assertEqual(updated["status"], state)
 
     async def test_task_context_is_not_wired_into_behavior_prompt(self):
         source = Path(__file__).with_name("behavior_service.py").read_text(encoding="utf-8")
@@ -133,6 +118,7 @@ class TaskTests(unittest.IsolatedAsyncioTestCase):
             "event:promise",
         )
         self.assertEqual(result["changes"], [])
+        self.assertEqual(result["status"], "disabled")
         self.assertEqual((await service.store.counts())["total"], 0)
 
     async def test_create_requires_observable_completion_criterion(self):
@@ -153,6 +139,7 @@ class TaskTests(unittest.IsolatedAsyncioTestCase):
             "event:rule",
         )
         self.assertEqual(result["changes"], [])
+        self.assertEqual(result["status"], "disabled")
         self.assertEqual((await service.store.counts())["total"], 0)
 
     async def test_paraphrased_same_task_links_instead_of_creating_duplicate(self):
@@ -250,10 +237,7 @@ class TaskTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_manager_api_can_create_edit_complete_and_delete(self):
         service = ScriptedTaskService(self.config, [])
-        with (
-            patch.object(manager_server, "task_service", service),
-            patch.object(manager_server, "_record_task_hormone", new=AsyncMock()),
-        ):
+        with patch.object(manager_server, "task_service", service):
             created = await manager_server.create_task(
                 manager_server.TaskCreate(title="网页事项", details="可手工维护", importance=4)
             )

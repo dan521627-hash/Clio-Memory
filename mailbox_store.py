@@ -1,16 +1,22 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
+import logging
 import os
 import sqlite3
 from datetime import datetime, timedelta
 
+from sqlite_utils import ClosingConnection
 from utils import (
     BEIJING_TIMEZONE,
     beijing_now,
     normalize_beijing_timestamp,
     now_iso,
 )
+
+
+logger = logging.getLogger("ombre_brain.mailbox")
 
 
 class MailboxStore:
@@ -22,11 +28,24 @@ class MailboxStore:
             config["buckets_dir"], "mailbox.sqlite3"
         )
         self.retention_days = max(0, int(settings.get("retention_days", 0)))
+        self._expiry_listener = None
         os.makedirs(os.path.dirname(os.path.abspath(self.db_path)), exist_ok=True)
         self._initialize()
 
+    def set_expiry_listener(self, listener) -> None:
+        """Register a best-effort hook for messages soft-deleted by retention.
+
+        The store remains independent of any optional sidecar.  Callers that
+        mirror mailbox provenance elsewhere can register a listener without
+        making normal mailbox writes or reads depend on that service.
+        """
+
+        self._expiry_listener = listener
+
     def _connect(self):
-        connection = sqlite3.connect(self.db_path, timeout=30)
+        connection = sqlite3.connect(
+            self.db_path, timeout=30, factory=ClosingConnection
+        )
         connection.row_factory = sqlite3.Row
         return connection
 
@@ -175,9 +194,20 @@ class MailboxStore:
         self, reference_time: datetime | None = None
     ) -> list[int]:
         """Soft-delete expired messages while always preserving the newest one."""
-        return await asyncio.to_thread(
+        expired_ids = await asyncio.to_thread(
             self._expire_old_messages_sync, reference_time
         )
+        if expired_ids and self._expiry_listener is not None:
+            try:
+                result = self._expiry_listener(list(expired_ids))
+                if inspect.isawaitable(result):
+                    await result
+            except Exception as error:
+                # Retention is durable before this notification runs.  A
+                # sidecar outage must never revive expired mail or fail a
+                # normal mailbox read/write.
+                logger.warning("Mailbox expiry sidecar notification failed: %s", error)
+        return expired_ids
 
     @staticmethod
     def _select_columns() -> str:

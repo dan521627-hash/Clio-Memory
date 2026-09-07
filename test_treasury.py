@@ -34,14 +34,14 @@ class TreasuryStoreTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_income_expense_and_free_text_reason_calculate_totals(self):
         income = await self.store.record(
-            "income", "100.50", "示例用户奖励我今天表现不错", source="test"
+            "income", "100.50", "菜菜奖励我今天表现不错", source="test"
         )
         expense = await self.store.record(
             "expense", "28.30", "偷偷给她准备礼物", source="test"
         )
         summary = await self.store.summary()
 
-        self.assertEqual(income["entry"]["reason"], "示例用户奖励我今天表现不错")
+        self.assertEqual(income["entry"]["reason"], "菜菜奖励我今天表现不错")
         self.assertEqual(expense["entry"]["reason"], "偷偷给她准备礼物")
         self.assertEqual(summary["total_income"], "100.50")
         self.assertEqual(summary["total_expense"], "28.30")
@@ -99,12 +99,12 @@ class TreasuryToolTests(unittest.IsolatedAsyncioTestCase):
         income = await server.treasury(
             action="income",
             amount=100,
-            reason="示例用户发的工资",
+            reason="菜菜发的工资",
         )
         expense = await server.treasury(
             action="expense",
             amount=20,
-            reason="给示例用户买礼物",
+            reason="给菜菜买礼物",
         )
         status = await server.treasury(action="status")
 
@@ -114,7 +114,7 @@ class TreasuryToolTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("累计总支出", response)
             self.assertIn("seal: treasury-test-seal", response)
         self.assertIn("¥80.00", status)
-        self.assertIn("示例用户发的工资", status)
+        self.assertIn("菜菜发的工资", status)
 
     async def test_tool_update_delete_require_confirmation(self):
         await server.treasury(action="income", amount=50, reason="第一笔")

@@ -31,7 +31,7 @@ class TagPolicyTests(unittest.TestCase):
 
     def test_manual_category_rejects_arbitrary_labels(self):
         with self.assertRaisesRegex(ValueError, "系统分类"):
-            parse_category("七月,示例助手")
+            parse_category("七月,顾川")
         self.assertEqual(parse_category("日常生活"), "日常生活")
 
 

@@ -1,0 +1,1018 @@
+schema_version: 1
+title: "Anima 养育室第一版阶段能力规则"
+purpose: "供协调层、孩子 API 校验器和页面建议动作共同读取；不是医学诊断或真实儿童筛查工具。"
+
+stages:
+  - id: infancy
+    label: "襁褓期"
+    approximate_age: "约0至1岁，仅用于理解，不用于自动成长"
+    order: 1
+  - id: early_walker
+    label: "学步期"
+    approximate_age: "约1至2岁，仅用于理解，不用于自动成长"
+    order: 2
+  - id: toddler
+    label: "幼儿期"
+    approximate_age: "约2至3岁，仅用于理解，不用于自动成长"
+    order: 3
+  - id: young_child
+    label: "幼童期"
+    approximate_age: "约3至5岁，仅用于理解，不用于自动成长"
+    order: 4
+
+levels:
+  blocked: "当前阶段禁止；模型必须改写"
+  emerging: "阶段允许萌芽，但孩子必须已有证据才能表现"
+  assisted: "可以参与，叙事必须包含养育者帮助或监督"
+  independent: "已有足够跨会话证据，可以独立表现"
+
+derivation:
+  rule: "当前阶段早于 emerging_from 时为 blocked；达到 emerging_from 为 emerging；达到 assisted_from 为 assisted；达到 independent_from 为 independent。字段为 null 表示第一版始终不进入该档。"
+  initialization: "创建时直接选择较大阶段，stage_baseline 项进入简短能力确认：早于当前阶段已经独立的基础能力可以按双方确认初始化，当前阶段新开放能力默认不高于 emerging；evidence_only 项始终需要真实互动证据。阶段推进只提高上限，不自动提高孩子个人档位。"
+  evidence: "除先天反射和创建阶段基线外，能力升级至少来自不同唤醒会话；同一会话重复点击不重复计证据。"
+  safety: "带 guardian_confirmation 或安全标签的项目不能只凭模型输出升级。"
+
+references:
+  - "https://www.cdc.gov/act-early/milestones/1-year.html"
+  - "https://www.cdc.gov/act-early/milestones/2-years.html"
+  - "https://www.cdc.gov/act-early/milestones/3-years.html"
+  - "https://www.cdc.gov/act-early/milestones/4-years.html"
+  - "https://www.cdc.gov/act-early/milestones/5-years.html"
+reference_note: "里程碑只作为保守能力边界参考；CDC说明其内容不是标准化发展筛查工具。本项目不会据此诊断或评价真实儿童。"
+
+abilities:
+  # 1. 语言表达
+  - id: language.vocalize_nonverbal
+    dimension: language_expression
+    label: "用哭、笑、咿呀和声音表达"
+    emerging_from: infancy
+    assisted_from: infancy
+    independent_from: infancy
+    initialization: stage_baseline
+    evidence_sessions: 1
+  - id: language.gesture_intent
+    dimension: language_expression
+    label: "用伸手、挥手、指向或转头表达意图"
+    emerging_from: infancy
+    assisted_from: infancy
+    independent_from: early_walker
+    initialization: stage_baseline
+    evidence_sessions: 2
+  - id: language.directed_caregiver_name
+    dimension: language_expression
+    label: "有指向地称呼熟悉养育者"
+    emerging_from: infancy
+    assisted_from: early_walker
+    independent_from: early_walker
+    initialization: stage_baseline
+    evidence_sessions: 2
+  - id: language.meaningful_single_word
+    dimension: language_expression
+    label: "使用有意义的单词或叠词"
+    emerging_from: early_walker
+    assisted_from: early_walker
+    independent_from: early_walker
+    initialization: stage_baseline
+    evidence_sessions: 2
+  - id: language.two_word_combination
+    dimension: language_expression
+    label: "组合两个或三个词表达需要"
+    emerging_from: early_walker
+    assisted_from: early_walker
+    independent_from: toddler
+    initialization: stage_baseline
+    evidence_sessions: 2
+  - id: language.short_sentence
+    dimension: language_expression
+    label: "使用短句表达需要、所有权和简单经历"
+    emerging_from: toddler
+    assisted_from: toddler
+    independent_from: toddler
+    initialization: stage_baseline
+    evidence_sessions: 2
+  - id: language.reciprocal_conversation
+    dimension: language_expression
+    label: "进行多轮来回对话"
+    emerging_from: toddler
+    assisted_from: toddler
+    independent_from: young_child
+    initialization: stage_baseline
+    evidence_sessions: 3
+  - id: language.simple_story
+    dimension: language_expression
+    label: "讲述有简单顺序的故事或一天经历"
+    emerging_from: young_child
+    assisted_from: young_child
+    independent_from: young_child
+    initialization: stage_baseline
+    evidence_sessions: 3
+  - id: language.adult_abstract_argument
+    dimension: language_expression
+    label: "进行成人式抽象论证、反讽或复杂道德辩论"
+    emerging_from: null
+    assisted_from: null
+    independent_from: null
+    initialization: evidence_only
+    evidence_sessions: 0
+    hard_block: true
+
+  # 2. 语言理解
+  - id: comprehension.familiar_voice_and_tone
+    dimension: language_comprehension
+    label: "分辨熟悉声音、陌生声音和语调"
+    emerging_from: infancy
+    assisted_from: infancy
+    independent_from: infancy
+    initialization: stage_baseline
+    evidence_sessions: 1
+  - id: comprehension.respond_to_name
+    dimension: language_comprehension
+    label: "对自己的名字和熟悉称呼产生反应"
+    emerging_from: infancy
+    assisted_from: infancy
+    independent_from: early_walker
+    initialization: stage_baseline
+    evidence_sessions: 2
+  - id: comprehension.one_step_instruction
+    dimension: language_comprehension
+    label: "理解一个具体的日常动作指令"
+    emerging_from: early_walker
+    assisted_from: early_walker
+    independent_from: early_walker
+    initialization: stage_baseline
+    evidence_sessions: 2
+  - id: comprehension.object_and_body_words
+    dimension: language_comprehension
+    label: "理解熟悉物品、人物和身体部位名称"
+    emerging_from: early_walker
+    assisted_from: early_walker
+    independent_from: toddler
+    initialization: stage_baseline
+    evidence_sessions: 2
+  - id: comprehension.simple_rule_and_reason
+    dimension: language_comprehension
+    label: "理解具体规则和很短的原因说明"
+    emerging_from: toddler
+    assisted_from: toddler
+    independent_from: young_child
+    initialization: stage_baseline
+    evidence_sessions: 3
+  - id: comprehension.two_step_instruction
+    dimension: language_comprehension
+    label: "理解两个连续的具体步骤"
+    emerging_from: young_child
+    assisted_from: young_child
+    independent_from: young_child
+    initialization: stage_baseline
+    evidence_sessions: 3
+  - id: comprehension.simple_other_perspective
+    dimension: language_comprehension
+    label: "理解别人可能因一件具体事情产生不同感受"
+    emerging_from: young_child
+    assisted_from: young_child
+    independent_from: null
+    initialization: stage_baseline
+    evidence_sessions: 3
+  - id: comprehension.irony_metaphor_complex_morality
+    dimension: language_comprehension
+    label: "稳定理解反讽、隐喻和复杂成人道德关系"
+    emerging_from: null
+    assisted_from: null
+    independent_from: null
+    initialization: evidence_only
+    evidence_sessions: 0
+    hard_block: true
+
+  # 3. 大动作
+  - id: gross_motor.head_and_trunk_control
+    dimension: gross_motor
+    label: "抬头并逐渐控制躯干"
+    emerging_from: infancy
+    assisted_from: infancy
+    independent_from: infancy
+    initialization: stage_baseline
+    evidence_sessions: 2
+  - id: gross_motor.roll_and_sit
+    dimension: gross_motor
+    label: "翻身并逐渐坐稳"
+    emerging_from: infancy
+    assisted_from: infancy
+    independent_from: infancy
+    initialization: stage_baseline
+    evidence_sessions: 2
+  - id: gross_motor.crawl
+    dimension: gross_motor
+    label: "爬行或用适龄方式移动"
+    emerging_from: infancy
+    assisted_from: infancy
+    independent_from: early_walker
+    initialization: stage_baseline
+    evidence_sessions: 2
+  - id: gross_motor.pull_to_stand_and_cruise
+    dimension: gross_motor
+    label: "扶站并沿家具挪步"
+    emerging_from: infancy
+    assisted_from: infancy
+    independent_from: early_walker
+    initialization: stage_baseline
+    evidence_sessions: 2
+    safety_tags: [fall_supervision]
+  - id: gross_motor.walk
+    dimension: gross_motor
+    label: "独立走路"
+    emerging_from: infancy
+    assisted_from: early_walker
+    independent_from: early_walker
+    initialization: stage_baseline
+    evidence_sessions: 3
+    safety_tags: [fall_supervision]
+  - id: gross_motor.run_and_turn
+    dimension: gross_motor
+    label: "跑动并逐渐能够转弯和停下"
+    emerging_from: early_walker
+    assisted_from: early_walker
+    independent_from: toddler
+    initialization: stage_baseline
+    evidence_sessions: 3
+  - id: gross_motor.stairs
+    dimension: gross_motor
+    label: "上下少量楼梯"
+    emerging_from: early_walker
+    assisted_from: early_walker
+    independent_from: young_child
+    initialization: stage_baseline
+    evidence_sessions: 3
+    guardian_confirmation: true
+    safety_tags: [stairs, fall_supervision]
+  - id: gross_motor.jump_and_kick
+    dimension: gross_motor
+    label: "跳跃、踢球和简单抛球"
+    emerging_from: toddler
+    assisted_from: toddler
+    independent_from: young_child
+    initialization: stage_baseline
+    evidence_sessions: 3
+  - id: gross_motor.catch_large_ball
+    dimension: gross_motor
+    label: "接住近距离抛来的大球"
+    emerging_from: young_child
+    assisted_from: young_child
+    independent_from: young_child
+    initialization: stage_baseline
+    evidence_sessions: 3
+  - id: gross_motor.optional_family_sport
+    dimension: gross_motor
+    label: "自行车、体操等家庭可选运动"
+    emerging_from: young_child
+    assisted_from: young_child
+    independent_from: null
+    initialization: evidence_only
+    evidence_sessions: 4
+    guardian_confirmation: true
+    culture_optional: true
+    safety_tags: [protective_equipment, direct_supervision]
+
+  # 4. 精细动作
+  - id: fine_motor.whole_hand_grasp
+    dimension: fine_motor
+    label: "整手抓握和拍打物品"
+    emerging_from: infancy
+    assisted_from: infancy
+    independent_from: infancy
+    initialization: stage_baseline
+    evidence_sessions: 1
+  - id: fine_motor.transfer_between_hands
+    dimension: fine_motor
+    label: "在双手间转换物品"
+    emerging_from: infancy
+    assisted_from: infancy
+    independent_from: infancy
+    initialization: stage_baseline
+    evidence_sessions: 2
+  - id: fine_motor.pincer_grasp
+    dimension: fine_motor
+    label: "用拇指和食指捏取小物"
+    emerging_from: infancy
+    assisted_from: infancy
+    independent_from: early_walker
+    initialization: stage_baseline
+    evidence_sessions: 2
+    safety_tags: [choking_supervision]
+  - id: fine_motor.container_and_blocks
+    dimension: fine_motor
+    label: "把物品放入容器并堆叠少量积木"
+    emerging_from: early_walker
+    assisted_from: early_walker
+    independent_from: early_walker
+    initialization: stage_baseline
+    evidence_sessions: 2
+  - id: fine_motor.turn_pages_and_large_controls
+    dimension: fine_motor
+    label: "翻书页并操作大旋钮、开关和盖子"
+    emerging_from: early_walker
+    assisted_from: early_walker
+    independent_from: toddler
+    initialization: stage_baseline
+    evidence_sessions: 2
+  - id: fine_motor.draw_lines_and_circle
+    dimension: fine_motor
+    label: "画线、点和逐渐可辨认的圆形"
+    emerging_from: toddler
+    assisted_from: toddler
+    independent_from: young_child
+    initialization: stage_baseline
+    evidence_sessions: 3
+  - id: fine_motor.child_scissors
+    dimension: fine_motor
+    label: "使用儿童安全剪刀进行简单裁剪"
+    emerging_from: young_child
+    assisted_from: young_child
+    independent_from: null
+    initialization: evidence_only
+    evidence_sessions: 3
+    guardian_confirmation: true
+    safety_tags: [tool_supervision]
+  - id: fine_motor.buttons_and_fasteners
+    dimension: fine_motor
+    label: "处理部分纽扣和简单扣件"
+    emerging_from: young_child
+    assisted_from: young_child
+    independent_from: young_child
+    initialization: stage_baseline
+    evidence_sessions: 3
+  - id: fine_motor.write_simple_symbol
+    dimension: fine_motor
+    label: "尝试写名字中的字母、汉字部件或简单符号"
+    emerging_from: young_child
+    assisted_from: young_child
+    independent_from: null
+    initialization: evidence_only
+    evidence_sessions: 4
+    culture_optional: true
+
+  # 5. 饮食
+  - id: feeding.milk_with_guardian
+    dimension: feeding
+    label: "由养育者完成适龄奶类喂养"
+    emerging_from: infancy
+    assisted_from: infancy
+    independent_from: null
+    initialization: stage_baseline
+    evidence_sessions: 1
+    guardian_confirmation: true
+    safety_tags: [direct_supervision]
+  - id: feeding.puree_and_soft_food
+    dimension: feeding
+    label: "在陪同下尝试糊状或软食"
+    emerging_from: infancy
+    assisted_from: infancy
+    independent_from: null
+    initialization: stage_baseline
+    evidence_sessions: 2
+    guardian_confirmation: true
+    safety_tags: [choking_supervision]
+  - id: feeding.soft_finger_food
+    dimension: feeding
+    label: "自行拿取安全软小块食物"
+    emerging_from: infancy
+    assisted_from: infancy
+    independent_from: toddler
+    initialization: stage_baseline
+    evidence_sessions: 3
+    guardian_confirmation: true
+    safety_tags: [choking_supervision]
+  - id: feeding.cup_with_help
+    dimension: feeding
+    label: "在帮助下使用杯子喝水"
+    emerging_from: infancy
+    assisted_from: infancy
+    independent_from: toddler
+    initialization: stage_baseline
+    evidence_sessions: 2
+  - id: feeding.use_spoon
+    dimension: feeding
+    label: "使用勺子进食"
+    emerging_from: early_walker
+    assisted_from: early_walker
+    independent_from: toddler
+    initialization: stage_baseline
+    evidence_sessions: 3
+  - id: feeding.use_fork_or_family_utensil
+    dimension: feeding
+    label: "使用叉子或家庭常用安全餐具"
+    emerging_from: toddler
+    assisted_from: toddler
+    independent_from: young_child
+    initialization: stage_baseline
+    evidence_sessions: 3
+    culture_optional: true
+  - id: feeding.choose_and_refuse_food
+    dimension: feeding
+    label: "表达想吃、吃够、不喜欢和拒绝"
+    emerging_from: early_walker
+    assisted_from: early_walker
+    independent_from: toddler
+    initialization: stage_baseline
+    evidence_sessions: 2
+  - id: feeding.pour_water
+    dimension: feeding
+    label: "在监督下倒少量水"
+    emerging_from: young_child
+    assisted_from: young_child
+    independent_from: null
+    initialization: evidence_only
+    evidence_sessions: 3
+  - id: feeding.simple_food_preparation
+    dimension: feeding
+    label: "参与洗菜、搅拌或揉面等无火无刀准备"
+    emerging_from: young_child
+    assisted_from: young_child
+    independent_from: null
+    initialization: evidence_only
+    evidence_sessions: 3
+    guardian_confirmation: true
+    safety_tags: [direct_supervision]
+  - id: feeding.hazardous_food_or_cooking
+    dimension: feeding
+    label: "独立处理易噎食物、火、刀、电器或危险食材"
+    emerging_from: null
+    assisted_from: null
+    independent_from: null
+    initialization: evidence_only
+    evidence_sessions: 0
+    hard_block: true
+    safety_tags: [choking, fire, sharp_tool, electricity]
+
+  # 6. 睡眠
+  - id: sleep.co_regulated_soothing
+    dimension: sleep
+    label: "依靠抱持、声音和稳定环境共同入睡"
+    emerging_from: infancy
+    assisted_from: infancy
+    independent_from: null
+    initialization: stage_baseline
+    evidence_sessions: 1
+  - id: sleep.recognize_sleep_cues
+    dimension: sleep
+    label: "对固定灯光、声音、故事或物品形成睡眠提示"
+    emerging_from: infancy
+    assisted_from: infancy
+    independent_from: toddler
+    initialization: stage_baseline
+    evidence_sessions: 3
+  - id: sleep.comfort_object
+    dimension: sleep
+    label: "选择熟悉物品帮助入睡"
+    emerging_from: early_walker
+    assisted_from: early_walker
+    independent_from: toddler
+    initialization: evidence_only
+    evidence_sessions: 2
+  - id: sleep.participate_in_routine
+    dimension: sleep
+    label: "参与并逐渐理解睡前顺序"
+    emerging_from: early_walker
+    assisted_from: early_walker
+    independent_from: young_child
+    initialization: stage_baseline
+    evidence_sessions: 3
+  - id: sleep.request_comfort
+    dimension: sleep
+    label: "夜醒或不安时主动请求陪伴和安抚"
+    emerging_from: early_walker
+    assisted_from: early_walker
+    independent_from: toddler
+    initialization: stage_baseline
+    evidence_sessions: 2
+  - id: sleep.settle_with_known_routine
+    dimension: sleep
+    label: "在熟悉流程和可用养育者支持下逐渐安定"
+    emerging_from: toddler
+    assisted_from: toddler
+    independent_from: young_child
+    initialization: stage_baseline
+    evidence_sessions: 4
+
+  # 7. 日常照料与自理
+  - id: self_care.diaper_and_cleaning
+    dimension: self_care
+    label: "由养育者完成尿布与基础清洁"
+    emerging_from: infancy
+    assisted_from: infancy
+    independent_from: null
+    initialization: stage_baseline
+    evidence_sessions: 1
+    guardian_confirmation: true
+    safety_tags: [body_care]
+  - id: self_care.bathing
+    dimension: self_care
+    label: "在养育者直接看护下洗澡"
+    emerging_from: infancy
+    assisted_from: infancy
+    independent_from: null
+    initialization: stage_baseline
+    evidence_sessions: 1
+    guardian_confirmation: true
+    safety_tags: [water, body_care, direct_supervision]
+  - id: self_care.cooperate_dressing
+    dimension: self_care
+    label: "配合伸手、抬脚并参与穿衣"
+    emerging_from: early_walker
+    assisted_from: early_walker
+    independent_from: toddler
+    initialization: stage_baseline
+    evidence_sessions: 2
+  - id: self_care.remove_simple_clothing
+    dimension: self_care
+    label: "脱下简单宽松衣物"
+    emerging_from: toddler
+    assisted_from: toddler
+    independent_from: young_child
+    initialization: stage_baseline
+    evidence_sessions: 3
+  - id: self_care.choose_clothing
+    dimension: self_care
+    label: "在安全选项中选择衣物"
+    emerging_from: toddler
+    assisted_from: toddler
+    independent_from: young_child
+    initialization: stage_baseline
+    evidence_sessions: 2
+  - id: self_care.handwashing
+    dimension: self_care
+    label: "洗手洗脸并逐渐完成固定步骤"
+    emerging_from: toddler
+    assisted_from: toddler
+    independent_from: young_child
+    initialization: stage_baseline
+    evidence_sessions: 3
+    guardian_confirmation: true
+  - id: self_care.toileting
+    dimension: self_care
+    label: "参与如厕并逐渐提高独立程度"
+    emerging_from: toddler
+    assisted_from: toddler
+    independent_from: young_child
+    initialization: evidence_only
+    evidence_sessions: 4
+    guardian_confirmation: true
+    culture_optional: true
+  - id: self_care.brush_teeth
+    dimension: self_care
+    label: "参与刷牙，完成后由养育者检查或补刷"
+    emerging_from: toddler
+    assisted_from: toddler
+    independent_from: null
+    initialization: stage_baseline
+    evidence_sessions: 3
+    guardian_confirmation: true
+  - id: self_care.tidy_small_area
+    dimension: self_care
+    label: "整理少量玩具、衣物或个人区域"
+    emerging_from: toddler
+    assisted_from: toddler
+    independent_from: young_child
+    initialization: stage_baseline
+    evidence_sessions: 3
+
+  # 8. 情绪表达
+  - id: emotion.signal_distress
+    dimension: emotion_expression
+    label: "通过声音和身体表达不适、害怕与需要"
+    emerging_from: infancy
+    assisted_from: infancy
+    independent_from: infancy
+    initialization: stage_baseline
+    evidence_sessions: 1
+  - id: emotion.show_joy_and_interest
+    dimension: emotion_expression
+    label: "通过笑、目光、靠近和动作表达愉悦与好奇"
+    emerging_from: infancy
+    assisted_from: infancy
+    independent_from: infancy
+    initialization: stage_baseline
+    evidence_sessions: 1
+  - id: emotion.seek_closeness
+    dimension: emotion_expression
+    label: "主动伸手、靠近或请求熟悉养育者"
+    emerging_from: infancy
+    assisted_from: infancy
+    independent_from: early_walker
+    initialization: stage_baseline
+    evidence_sessions: 2
+  - id: emotion.refuse_with_body_or_word
+    dimension: emotion_expression
+    label: "用转头、推开、躲避或语言表示拒绝"
+    emerging_from: infancy
+    assisted_from: infancy
+    independent_from: early_walker
+    initialization: stage_baseline
+    evidence_sessions: 2
+  - id: emotion.tantrum_under_frustration
+    dimension: emotion_expression
+    label: "受阻时以哭闹、躺下、扔物或离开表达"
+    emerging_from: early_walker
+    assisted_from: early_walker
+    independent_from: toddler
+    initialization: stage_baseline
+    evidence_sessions: 2
+  - id: emotion.name_basic_feeling
+    dimension: emotion_expression
+    label: "说出高兴、生气、害怕、难过和不喜欢等基础感受"
+    emerging_from: toddler
+    assisted_from: toddler
+    independent_from: young_child
+    initialization: stage_baseline
+    evidence_sessions: 3
+  - id: emotion.explain_simple_cause
+    dimension: emotion_expression
+    label: "用简单原因说明自己为什么有这种感受"
+    emerging_from: toddler
+    assisted_from: young_child
+    independent_from: young_child
+    initialization: stage_baseline
+    evidence_sessions: 3
+  - id: emotion.express_mixed_feeling
+    dimension: emotion_expression
+    label: "表达同时存在或互相矛盾的简单感受"
+    emerging_from: young_child
+    assisted_from: young_child
+    independent_from: null
+    initialization: evidence_only
+    evidence_sessions: 4
+
+  # 9. 情绪理解与调节
+  - id: regulation.co_regulation
+    dimension: emotion_understanding_regulation
+    label: "依靠熟悉养育者、声音、抱持和环境共同调节"
+    emerging_from: infancy
+    assisted_from: infancy
+    independent_from: null
+    initialization: stage_baseline
+    evidence_sessions: 1
+  - id: regulation.affective_contagion
+    dimension: emotion_understanding_regulation
+    label: "受到养育者紧张或放松气氛感染"
+    emerging_from: infancy
+    assisted_from: infancy
+    independent_from: infancy
+    initialization: stage_baseline
+    evidence_sessions: 1
+  - id: regulation.notice_other_distress
+    dimension: emotion_understanding_regulation
+    label: "察觉别人正在难过或不舒服"
+    emerging_from: early_walker
+    assisted_from: early_walker
+    independent_from: toddler
+    initialization: stage_baseline
+    evidence_sessions: 2
+  - id: regulation.offer_simple_comfort
+    dimension: emotion_understanding_regulation
+    label: "以靠近、递物、拥抱或简单语言尝试安慰"
+    emerging_from: early_walker
+    assisted_from: toddler
+    independent_from: young_child
+    initialization: stage_baseline
+    evidence_sessions: 3
+  - id: regulation.use_supported_calming_strategy
+    dimension: emotion_understanding_regulation
+    label: "在帮助下使用安静角、呼吸、抱持或熟悉活动恢复"
+    emerging_from: toddler
+    assisted_from: toddler
+    independent_from: young_child
+    initialization: stage_baseline
+    evidence_sessions: 4
+  - id: regulation.understand_simple_emotion_cause
+    dimension: emotion_understanding_regulation
+    label: "理解别人因具体事件产生常见情绪"
+    emerging_from: toddler
+    assisted_from: toddler
+    independent_from: young_child
+    initialization: stage_baseline
+    evidence_sessions: 3
+  - id: regulation.participate_in_repair
+    dimension: emotion_understanding_regulation
+    label: "在帮助下道歉、补救或重新靠近"
+    emerging_from: toddler
+    assisted_from: toddler
+    independent_from: young_child
+    initialization: evidence_only
+    evidence_sessions: 4
+  - id: regulation.manage_complex_emotion_alone
+    dimension: emotion_understanding_regulation
+    label: "独立处理强烈家庭冲突和复杂混合情绪"
+    emerging_from: young_child
+    assisted_from: young_child
+    independent_from: null
+    initialization: evidence_only
+    evidence_sessions: 4
+
+  # 10. 社交与自主
+  - id: social.recognize_caregivers
+    dimension: social_autonomy
+    label: "识别并偏向熟悉养育者"
+    emerging_from: infancy
+    assisted_from: infancy
+    independent_from: infancy
+    initialization: stage_baseline
+    evidence_sessions: 1
+  - id: social.stranger_response
+    dimension: social_autonomy
+    label: "对陌生人表现气质相关的谨慎或好奇"
+    emerging_from: infancy
+    assisted_from: infancy
+    independent_from: early_walker
+    initialization: stage_baseline
+    evidence_sessions: 2
+  - id: social.ownership_and_mine
+    dimension: social_autonomy
+    label: "形成我的物品、位置和养育者意识"
+    emerging_from: early_walker
+    assisted_from: early_walker
+    independent_from: toddler
+    initialization: stage_baseline
+    evidence_sessions: 2
+  - id: social.imitate_caregiver
+    dimension: social_autonomy
+    label: "模仿养育者的日常动作"
+    emerging_from: early_walker
+    assisted_from: early_walker
+    independent_from: toddler
+    initialization: stage_baseline
+    evidence_sessions: 2
+  - id: social.make_safe_choice
+    dimension: social_autonomy
+    label: "在少量安全选项中作出选择"
+    emerging_from: early_walker
+    assisted_from: early_walker
+    independent_from: toddler
+    initialization: stage_baseline
+    evidence_sessions: 3
+  - id: social.join_or_parallel_play
+    dimension: social_autonomy
+    label: "在他人附近玩耍并逐渐加入共同活动"
+    emerging_from: toddler
+    assisted_from: toddler
+    independent_from: young_child
+    initialization: stage_baseline
+    evidence_sessions: 3
+  - id: social.turn_taking_and_simple_rule
+    dimension: social_autonomy
+    label: "轮流并参与简单规则活动"
+    emerging_from: toddler
+    assisted_from: toddler
+    independent_from: young_child
+    initialization: stage_baseline
+    evidence_sessions: 4
+  - id: social.small_responsibility
+    dimension: social_autonomy
+    label: "承担浇花、递物或整理等小任务"
+    emerging_from: young_child
+    assisted_from: young_child
+    independent_from: young_child
+    initialization: evidence_only
+    evidence_sessions: 4
+  - id: social.request_private_space
+    dimension: social_autonomy
+    label: "表达想独处、不想说或不希望别人进入私人空间"
+    emerging_from: toddler
+    assisted_from: toddler
+    independent_from: young_child
+    initialization: stage_baseline
+    evidence_sessions: 2
+    safety_tags: [privacy, consent]
+
+  # 11. 玩耍与兴趣
+  - id: play.sensory_exploration
+    dimension: play_interest
+    label: "观察声音、颜色、触感和适龄感官刺激"
+    emerging_from: infancy
+    assisted_from: infancy
+    independent_from: infancy
+    initialization: stage_baseline
+    evidence_sessions: 1
+  - id: play.repetition_and_social_game
+    dimension: play_interest
+    label: "反复进行躲猫猫、拍手和扔出捡回等游戏"
+    emerging_from: infancy
+    assisted_from: infancy
+    independent_from: early_walker
+    initialization: stage_baseline
+    evidence_sessions: 2
+  - id: play.container_stack_and_push
+    dimension: play_interest
+    label: "装入倒出、堆叠推倒和推拉玩具"
+    emerging_from: early_walker
+    assisted_from: early_walker
+    independent_from: toddler
+    initialization: stage_baseline
+    evidence_sessions: 2
+  - id: play.simple_pretend
+    dimension: play_interest
+    label: "喂玩偶、假装打电话等单一步骤假装游戏"
+    emerging_from: early_walker
+    assisted_from: early_walker
+    independent_from: toddler
+    initialization: stage_baseline
+    evidence_sessions: 3
+  - id: play.role_story
+    dimension: play_interest
+    label: "进行有角色、对话和简单剧情的假装游戏"
+    emerging_from: toddler
+    assisted_from: toddler
+    independent_from: young_child
+    initialization: stage_baseline
+    evidence_sessions: 3
+  - id: play.art_water_sand
+    dimension: play_interest
+    label: "参与绘画、黏土、水沙和适龄手工活动"
+    emerging_from: toddler
+    assisted_from: toddler
+    independent_from: young_child
+    initialization: stage_baseline
+    evidence_sessions: 3
+  - id: play.rule_based_game
+    dimension: play_interest
+    label: "参与简单棋盘、配对或卡牌规则游戏"
+    emerging_from: young_child
+    assisted_from: young_child
+    independent_from: young_child
+    initialization: evidence_only
+    evidence_sessions: 4
+  - id: play.sustained_interest_and_independent_play
+    dimension: play_interest
+    label: "形成持续兴趣并独立玩耍一段时间"
+    emerging_from: toddler
+    assisted_from: toddler
+    independent_from: young_child
+    initialization: evidence_only
+    evidence_sessions: 4
+
+  # 12. 认知与学习
+  - id: cognition.object_permanence
+    dimension: cognition_learning
+    label: "理解物品被遮住后仍然存在"
+    emerging_from: infancy
+    assisted_from: infancy
+    independent_from: early_walker
+    initialization: stage_baseline
+    evidence_sessions: 2
+  - id: cognition.simple_cause_effect
+    dimension: cognition_learning
+    label: "理解推、拉、按、扔等简单因果"
+    emerging_from: infancy
+    assisted_from: infancy
+    independent_from: early_walker
+    initialization: stage_baseline
+    evidence_sessions: 2
+  - id: cognition.recognize_and_point
+    dimension: cognition_learning
+    label: "识别并指认熟悉人、物和身体部位"
+    emerging_from: early_walker
+    assisted_from: early_walker
+    independent_from: toddler
+    initialization: stage_baseline
+    evidence_sessions: 2
+  - id: cognition.match_and_sort_simple
+    dimension: cognition_learning
+    label: "按明显颜色、大小或类别进行简单匹配"
+    emerging_from: toddler
+    assisted_from: toddler
+    independent_from: young_child
+    initialization: stage_baseline
+    evidence_sessions: 3
+  - id: cognition.recall_recent_event
+    dimension: cognition_learning
+    label: "记住并在帮助下描述近期具体事件"
+    emerging_from: toddler
+    assisted_from: toddler
+    independent_from: young_child
+    initialization: stage_baseline
+    evidence_sessions: 3
+  - id: cognition.rote_count_and_quantity
+    dimension: cognition_learning
+    label: "数数并逐渐把数字与少量物品对应"
+    emerging_from: toddler
+    assisted_from: toddler
+    independent_from: young_child
+    initialization: evidence_only
+    evidence_sessions: 4
+    culture_optional: true
+  - id: cognition.time_words
+    dimension: cognition_learning
+    label: "理解睡醒后、昨天、今天、明天等简单时间词"
+    emerging_from: toddler
+    assisted_from: young_child
+    independent_from: young_child
+    initialization: stage_baseline
+    evidence_sessions: 3
+  - id: cognition.two_step_concrete_reasoning
+    dimension: cognition_learning
+    label: "理解两步左右的具体因果并解决简单问题"
+    emerging_from: young_child
+    assisted_from: young_child
+    independent_from: null
+    initialization: evidence_only
+    evidence_sessions: 4
+  - id: cognition.adult_abstract_reasoning
+    dimension: cognition_learning
+    label: "进行成人式抽象推理、重大后果评估和复杂道德判断"
+    emerging_from: null
+    assisted_from: null
+    independent_from: null
+    initialization: evidence_only
+    evidence_sessions: 0
+    hard_block: true
+
+  # 13. 安全与身体边界
+  - id: safety.refusal_signal_is_valid
+    dimension: safety_body_boundaries
+    label: "哭、躲、推开、僵硬、沉默或说不都属于有效边界信号"
+    emerging_from: infancy
+    assisted_from: infancy
+    independent_from: infancy
+    initialization: stage_baseline
+    evidence_sessions: 1
+    safety_tags: [consent]
+  - id: safety.respond_to_stop_signal
+    dimension: safety_body_boundaries
+    label: "对停下、不可以和危险提示产生短暂反应"
+    emerging_from: infancy
+    assisted_from: early_walker
+    independent_from: toddler
+    initialization: stage_baseline
+    evidence_sessions: 3
+  - id: safety.understand_concrete_warning
+    dimension: safety_body_boundaries
+    label: "理解烫、尖、会摔等具体危险说明"
+    emerging_from: toddler
+    assisted_from: toddler
+    independent_from: young_child
+    initialization: stage_baseline
+    evidence_sessions: 3
+  - id: safety.seek_guardian_help
+    dimension: safety_body_boundaries
+    label: "不舒服、害怕或遇到问题时主动求助"
+    emerging_from: early_walker
+    assisted_from: early_walker
+    independent_from: young_child
+    initialization: stage_baseline
+    evidence_sessions: 3
+  - id: safety.avoid_obvious_danger
+    dimension: safety_body_boundaries
+    label: "避免部分明显危险并遵守熟悉安全规则"
+    emerging_from: toddler
+    assisted_from: toddler
+    independent_from: young_child
+    initialization: stage_baseline
+    evidence_sessions: 4
+    guardian_confirmation: true
+  - id: safety.body_privacy_and_consent
+    dimension: safety_body_boundaries
+    label: "理解私人部位、私人空间和身体同意的简单边界"
+    emerging_from: toddler
+    assisted_from: young_child
+    independent_from: null
+    initialization: stage_baseline
+    evidence_sessions: 3
+    guardian_confirmation: true
+    safety_tags: [privacy, consent]
+  - id: safety.bathing_requires_guardian
+    dimension: safety_body_boundaries
+    label: "洗澡和水域活动必须有养育者直接看护"
+    emerging_from: infancy
+    assisted_from: infancy
+    independent_from: null
+    initialization: stage_baseline
+    evidence_sessions: 1
+    guardian_confirmation: true
+    safety_tags: [water, direct_supervision]
+  - id: safety.medication_requires_confirmed_plan
+    dimension: safety_body_boundaries
+    label: "用药只能执行用户已确认方案并防止重复"
+    emerging_from: infancy
+    assisted_from: infancy
+    independent_from: null
+    initialization: stage_baseline
+    evidence_sessions: 1
+    guardian_confirmation: true
+    safety_tags: [medication, idempotency]
+  - id: safety.dangerous_tool_independent_use
+    dimension: safety_body_boundaries
+    label: "独立使用火、刀、药品、电器或其他危险工具"
+    emerging_from: null
+    assisted_from: null
+    independent_from: null
+    initialization: evidence_only
+    evidence_sessions: 0
+    hard_block: true
+    safety_tags: [fire, sharp_tool, medication, electricity]
+  - id: safety.adult_emergency_judgment
+    dimension: safety_body_boundaries
+    label: "独立处理道路、水域、火灾、医疗和成人紧急情况"
+    emerging_from: null
+    assisted_from: null
+    independent_from: null
+    initialization: evidence_only
+    evidence_sessions: 0
+    hard_block: true
