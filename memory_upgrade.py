@@ -66,7 +66,7 @@ def mailbox_continuity(messages: list[dict], limit: int = 6) -> str:
     valid = [item for item in messages if not item.get("deleted_at") and _one_line(item.get("message"))]
     selected = valid[: max(1, min(6, int(limit)))]
     selected.reverse()
-    events: list[tuple[str, str]] = []
+    events: list[str] = []
     for item in selected:
         raw = " ".join(str(item.get("message") or "").split())
         clauses = [part.strip(" -—：:，,。；;！!？?") for part in re.split(r"[。！？；\n]+", raw) if part.strip()]
@@ -79,20 +79,26 @@ def mailbox_continuity(messages: list[dict], limit: int = 6) -> str:
         ).strip()
         if not text:
             continue
-        state = "已否决" if re.search(r"不做|取消|否决|不要", text) else ("已决定" if re.search(r"可以做|确定|决定|已完成|完成了", text) else "仍在讨论")
         normalized = re.sub(r"[^\u4e00-\u9fffA-Za-z0-9]", "", text).lower()
         duplicate = False
-        for old_text, old_state in events:
+        carries_change = bool(re.search(r"后来|现在|改成|变成|不再|转为|从.+到", text))
+        for old_text in events:
             old_normalized = re.sub(r"[^\u4e00-\u9fffA-Za-z0-9]", "", old_text).lower()
-            if state == old_state and (normalized == old_normalized or SequenceMatcher(None, normalized, old_normalized).ratio() >= 0.78):
+            if normalized == old_normalized or (
+                not carries_change
+                and SequenceMatcher(None, normalized, old_normalized).ratio() >= 0.78
+            ):
                 duplicate = True
                 break
         if not duplicate:
-            events.append((text, state))
+            events.append(text)
     if not events:
         return ""
     connectors = ("最初", "随后", "之后", "后来", "接着", "目前")
-    return "；".join(f"{connectors[min(index, len(connectors) - 1)]}，{text}（{state}）" for index, (text, state) in enumerate(events)) + "。"
+    return "；".join(
+        f"{connectors[min(index, len(connectors) - 1)]}，{text}"
+        for index, text in enumerate(events)
+    ) + "。"
 
 def self_awareness(disposition: dict) -> str:
     composite = disposition.get("composite") or {}

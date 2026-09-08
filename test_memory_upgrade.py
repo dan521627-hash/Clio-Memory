@@ -36,7 +36,7 @@ class MemoryUpgradeTests(unittest.TestCase):
         self.assertEqual(start.isoformat(), "2026-08-01T00:00:00")
         self.assertEqual(end.isoformat(), "2026-09-01T00:00:00")
 
-    def test_six_mailbox_events_are_chronological_and_status_labeled(self):
+    def test_six_mailbox_events_are_chronological_without_status_labels(self):
         messages = [
             {"message_id": i, "created_at": f"2026-09-0{i}T10:00:00", "message": text}
             for i, text in enumerate(
@@ -45,10 +45,14 @@ class MemoryUpgradeTests(unittest.TestCase):
             )
         ][::-1]
         result = mailbox_continuity(messages)
-        self.assertEqual(result.count("（"), 6)
+        self.assertNotIn("（已完成）", result)
+        self.assertNotIn("（已决定）", result)
+        self.assertNotIn("（已否决）", result)
+        self.assertNotIn("（仍在讨论）", result)
+        self.assertNotIn("（待确认）", result)
         self.assertNotIn("还在讨论颜色", result)
-        self.assertIn("已决定", result)
-        self.assertIn("已否决", result)
+        self.assertIn("决定使用蓝色", result)
+        self.assertIn("这个方案不要", result)
         self.assertFalse(result.startswith("- "))
         self.assertIn("最初", result)
 
