@@ -1,8 +1,8 @@
-# Clio Memory 2.0 新增原创部分许可说明
+# Anima 2.0 新增原创部分许可说明
 
 Copyright (c) 2026 dan521627-hash. All rights reserved except as stated below.
 
-本许可只适用于 Clio Memory 2.0 中由 dan521627-hash 新增的原创代码、文档、说明图片和其他原创改动。来自 Ombre-Brain 的上游代码仍适用仓库根目录中的 MIT License。
+本许可只适用于 Anima 2.0 中由 dan521627-hash 新增的原创代码、文档、说明图片和其他原创改动。来自 Ombre-Brain 的上游代码仍适用仓库根目录中的 MIT License。
 
 在保留本文件、`LICENSE`、`NOTICE.md` 和作者署名的前提下，你可以下载、研究、修改，并为个人、教学、研究或其他非商业目的运行和再发布。
 
@@ -10,7 +10,7 @@ Copyright (c) 2026 dan521627-hash. All rights reserved except as stated below.
 
 公开发布、演示或分享修改版时，应在显著位置保留：
 
-> Based on Clio Memory 2.0 by dan521627-hash.
+> Based on Anima 2.0 by dan521627-hash.
 
 本项目按“原样”提供，不附带任何明示或默示担保。使用者自行承担运行、数据备份、安全配置和模型输出带来的风险。
 

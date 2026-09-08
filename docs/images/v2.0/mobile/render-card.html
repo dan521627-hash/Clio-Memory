@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<style>
+  *{box-sizing:border-box} html,body{margin:0;width:1080px;height:1350px;overflow:hidden}
+  body{font-family:"Microsoft YaHei","PingFang SC",sans-serif;color:#3d2b23;background:#fbf2df}
+  .card{position:relative;width:1080px;height:1350px;overflow:hidden;background:#fbf2df}
+  .photo{position:absolute;inset:0;background:url('warm-memory-room.png') center/cover no-repeat;transform:scale(1.015)}
+  .wash{position:absolute;inset:0;background:linear-gradient(180deg,rgba(255,250,240,.97) 0%,rgba(255,249,237,.91) 45%,rgba(255,246,229,.18) 73%,rgba(93,61,40,.08) 100%)}
+  .content{position:absolute;left:82px;right:82px;top:78px;z-index:3}
+  .brand{display:flex;align-items:center;gap:18px;color:#a7502f;font-size:26px;font-weight:800;letter-spacing:2px}
+  .brand:before{content:"";width:44px;height:4px;border-radius:9px;background:#c7653d}
+  .kicker{margin-top:88px;color:#a7502f;font-size:28px;font-weight:800;letter-spacing:4px}
+  h1{margin:26px 0 0;max-width:850px;font-family:"Microsoft YaHei","PingFang SC",sans-serif;font-size:82px;line-height:1.16;letter-spacing:-3px;font-weight:900;color:#35241e}
+  .accent{color:#b95632}
+  .sub{margin-top:30px;max-width:870px;font-size:32px;line-height:1.56;font-weight:500;color:#725b4e}
+  .details{display:grid;gap:14px;margin-top:26px;max-width:880px}
+  .detail{display:flex;gap:15px;align-items:flex-start;font-size:26px;line-height:1.45;color:#5f493d;font-weight:600}
+  .detail:before{content:"";flex:0 0 10px;width:10px;height:10px;margin-top:14px;border-radius:50%;background:#c35e38}
+  .pill{display:inline-flex;margin-top:26px;padding:15px 25px;border-radius:999px;background:rgba(255,250,240,.86);border:2px solid rgba(169,91,54,.22);box-shadow:0 12px 35px rgba(95,55,31,.08);font-size:23px;color:#8d4d32;font-weight:700}
+  .num{position:absolute;right:76px;bottom:60px;z-index:4;color:rgba(255,255,255,.92);font:800 25px/1 Arial;letter-spacing:3px;text-shadow:0 2px 14px rgba(65,40,27,.25)}
+  .tag{position:absolute;left:78px;bottom:58px;z-index:4;color:#fff;font-size:24px;font-weight:700;letter-spacing:2px;text-shadow:0 2px 14px rgba(65,40,27,.35)}
+  .card.alt .photo{top:610px;transform:scale(1.02)}
+  .card.alt .wash{background:linear-gradient(180deg,#fff9ec 0%,#fbf0da 51%,rgba(251,240,218,.46) 67%,rgba(74,48,34,.09) 100%)}
+  .card.alt .kicker{margin-top:58px}
+  .card.alt h1{font-size:72px;max-width:900px}
+  .card.alt .sub{font-size:30px;max-width:890px}
+  .card.soft:after{content:"";position:absolute;width:520px;height:520px;border-radius:50%;right:-210px;top:-210px;background:rgba(233,173,111,.17)}
+</style>
+<main id="card" class="card">
+  <div class="photo"></div><div class="wash"></div>
+  <section class="content">
+    <div class="brand">ANIMA 2.0</div>
+    <div class="kicker" id="kicker"></div>
+    <h1 id="title"></h1>
+    <div class="sub" id="sub"></div>
+    <div class="details" id="details"></div>
+    <div class="pill" id="pill"></div>
+  </section>
+  <div class="tag">记忆，不只是保存</div><div class="num" id="num"></div>
+</main>
+<script>
+const cards=[
+ {k:'这一次，不只是记住',t:'AI终于能<br><span class="accent">接着你说下去</span>',s:'Anima 2.0 把散开的记忆重新接成一条有前后的生活线。',d:['不只保存一句话，还能理解事情后来怎样变化','记忆会继续影响关系、当下状态和后续回应'],p:'从 1.4 到 2.0 · 底层大升级',c:''},
+ {k:'最近六封信',t:'不再是六段<br><span class="accent">重复的开头</span>',s:'开机时看到的，不再是把六封信各截一段拼在一起。',d:['同一件事自动合并，只讲一次','“以前这样、后来变了”的过程会按先后保留下来'],p:'去重 · 排序 · 保留变化',c:'alt'},
+ {k:'一条记忆写进去之后',t:'它真的会<br><span class="accent">牵动后来</span>',s:'以前记忆、关系和状态像几套分开的账；现在它们会互相接上。',d:['关系温度根据真实事件变化，不再长期停在 100 附近','此刻状态与自我觉察都保留来源，知道为何改变'],p:'事件 → 关系 → 状态 → 觉察',c:'alt soft'},
+ {k:'养育室聊天重做底层逻辑',t:'先好好回你<br><span class="accent">再安静记录</span>',s:'孩子不再为了填写一张严格格式表，动不动就变成“没有回应”。',d:['对话先以自然中文正常显示','情绪和照顾信息由后台另行提取，失败也不吞回复'],p:'自然对话优先 · 后台自动抓取',c:'alt'},
+ {k:'照顾不再靠猜',t:'问一句喝不喝水<br><span class="accent">不等于已经喝了</span>',s:'系统会把“提议一下”和“确实完成”分开，不再把一句聊天误记成事实。',d:['只有明确喝下、吃完、安慰过，才进入照顾记录','真实照顾会联动孩子状态；疑问和计划不会'],p:'少误记 · 不乱改 · 有依据',c:'alt soft'},
+ {k:'2.0 先把内里做稳',t:'现在能用<br><span class="accent">还会更好看</span>',s:'这次完成的是记忆、关系、状态和养育室的核心链路升级。',d:['电脑端和手机端目前都可以使用','整套 UI 还没有正式重做，下一次更新会集中改善界面'],p:'可先体验 · UI 仍在继续',c:'alt'}
+];
+const i=Math.max(0,Math.min(cards.length-1,Number(new URLSearchParams(location.search).get('i')||0))),d=cards[i];
+document.getElementById('card').className='card '+d.c;
+document.getElementById('kicker').textContent=d.k;
+document.getElementById('title').innerHTML=d.t;
+document.getElementById('sub').innerHTML=d.s;
+document.getElementById('details').innerHTML=d.d.map(x=>'<div class="detail">'+x+'</div>').join('');
+document.getElementById('pill').textContent=d.p;
+document.getElementById('num').textContent=String(i+1).padStart(2,'0')+' / 06';
+</script>
+</html>

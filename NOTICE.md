@@ -1,6 +1,6 @@
 # 版权、署名与参考仓库
 
-Clio Memory 2.0 的新增设计、代码改造、文档与发布图片：
+Anima 2.0 的新增设计、代码改造、文档与发布图片：
 
 Copyright (c) 2026 dan521627-hash
 
@@ -8,7 +8,7 @@ Copyright (c) 2026 dan521627-hash
 
 发布修改版、演示版或衍生版本时，请保留以下署名：
 
-> Based on Clio Memory 2.0 by dan521627-hash.
+> Based on Anima 2.0 by dan521627-hash.
 
 ## 参考过的仓库
 
@@ -16,4 +16,4 @@ Copyright (c) 2026 dan521627-hash
 - [@qimingjiu/twig-memory](https://github.com/qimingjiu/twig-memory)
 - [@tianyupaipai-cmd/xinchao-nian](https://github.com/tianyupaipai-cmd/xinchao-nian)
 
-这里只列出参考过的仓库，不代表这些仓库的作者认可、维护或担保 Clio Memory。
+这里只列出参考过的仓库，不代表这些仓库的作者认可、维护或担保 Anima。

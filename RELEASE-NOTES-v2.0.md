@@ -1,6 +1,6 @@
-# Clio Memory 2.0 升级说明
+# Anima 2.0 升级说明
 
-![从记住走向接续](docs/images/v2.0/01-upgrade.png)
+<img src="docs/images/v2.0/mobile/01-mobile.png" alt="从记住走向接续" width="540">
 
 ## 为什么是 2.0
 
@@ -8,11 +8,13 @@
 
 ## 与 1.4 相比
 
-![六封信讲成一件事](docs/images/v2.0/02-upgrade.png)
+<img src="docs/images/v2.0/mobile/02-mobile.png" alt="六封信讲成一件事" width="540">
 
-![一条记忆牵动后来](docs/images/v2.0/03-upgrade.png)
+<img src="docs/images/v2.0/mobile/03-mobile.png" alt="一条记忆牵动后来" width="540">
 
-![养育室先好好说话再安静记录](docs/images/v2.0/04-upgrade.png)
+<img src="docs/images/v2.0/mobile/04-mobile.png" alt="养育室先好好说话再安静记录" width="540">
+
+<img src="docs/images/v2.0/mobile/05-mobile.png" alt="照顾不再靠猜" width="540">
 
 | 方面 | 1.4 | 2.0 | 实际帮助 |
 | --- | --- | --- | --- |
@@ -27,7 +29,7 @@
 
 ## 发布边界
 
-![底层已升级界面还会继续](docs/images/v2.0/05-upgrade.png)
+<img src="docs/images/v2.0/mobile/06-mobile.png" alt="底层已升级界面还会继续" width="540">
 
 - 这是脱敏源码，不包含任何真实运行数据。
 - 不包含 VPS 地址、真实域名、账户、密码、API 密钥或私人内容。
