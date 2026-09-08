@@ -6,7 +6,7 @@
 >
 > 这是从 1.4 到 2.0 的底层能力大升级。电脑端和手机端页面目前已经可用，但完整 UI 重做尚未完成；下一版本将集中更新网页视觉与操作体验。
 
-![Clio Memory 2.0 总览](docs/images/v2.0/01-overview-background.png)
+![Clio Memory 2.0 总览](docs/images/v2.0/01-upgrade.png)
 
 ## 2.0 多了什么
 

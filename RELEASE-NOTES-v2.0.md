@@ -1,10 +1,18 @@
 # Clio Memory 2.0 升级说明
 
+![从记住走向接续](docs/images/v2.0/01-upgrade.png)
+
 ## 为什么是 2.0
 
 1.4 的重点是把长期记忆系统整理成可公开、可部署的版本。2.0 改变了记忆之间如何连接，以及记忆如何影响关系、状态和养育室，因此属于大版本升级。
 
 ## 与 1.4 相比
+
+![六封信讲成一件事](docs/images/v2.0/02-upgrade.png)
+
+![一条记忆牵动后来](docs/images/v2.0/03-upgrade.png)
+
+![养育室先好好说话再安静记录](docs/images/v2.0/04-upgrade.png)
 
 | 方面 | 1.4 | 2.0 | 实际帮助 |
 | --- | --- | --- | --- |
@@ -19,6 +27,8 @@
 
 ## 发布边界
 
+![底层已升级界面还会继续](docs/images/v2.0/05-upgrade.png)
+
 - 这是脱敏源码，不包含任何真实运行数据。
 - 不包含 VPS 地址、真实域名、账户、密码、API 密钥或私人内容。
 - 电脑端和手机端 UI 尚未完成整体重做。
@@ -29,4 +39,3 @@
 - [@P0lar1zzZ/Ombre-Brain](https://github.com/P0lar1zzZ/Ombre-Brain)
 - [@qimingjiu/twig-memory](https://github.com/qimingjiu/twig-memory)
 - [@tianyupaipai-cmd/xinchao-nian](https://github.com/tianyupaipai-cmd/xinchao-nian)
-

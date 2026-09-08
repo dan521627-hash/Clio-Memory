@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=1600, initial-scale=1">
+  <title>Clio Memory 2.0 升级说明</title>
+  <style>
+    * { box-sizing: border-box; }
+    html, body { margin: 0; width: 1600px; height: 1000px; overflow: hidden; }
+    body { font-family: "Microsoft YaHei", "Noto Sans SC", sans-serif; color: #203a32; }
+    .card { position: relative; width: 1600px; height: 1000px; background: #f5eddb center/cover no-repeat; }
+    .shade { position: absolute; inset: 0; background: linear-gradient(90deg, rgba(250,246,235,.98) 0%, rgba(250,246,235,.93) 36%, rgba(250,246,235,.30) 61%, rgba(250,246,235,.04) 100%); }
+    .content { position: absolute; left: 86px; top: 72px; width: 610px; }
+    .brand { font-family: Georgia, serif; font-size: 24px; letter-spacing: .16em; color: #9a512f; }
+    .badge { display: inline-block; margin-top: 24px; padding: 10px 18px; border: 1px solid rgba(154,81,47,.35); border-radius: 999px; font-weight: 700; font-size: 20px; background: rgba(255,251,241,.72); }
+    h1 { margin: 34px 0 12px; font-family: Georgia, "Microsoft YaHei", serif; font-size: 64px; line-height: 1.12; letter-spacing: -.02em; }
+    .lead { margin: 0 0 34px; color: #5c655f; font-size: 27px; line-height: 1.55; }
+    .row { margin: 16px 0; padding: 18px 22px; border-left: 5px solid #b35b34; background: rgba(255,252,244,.76); box-shadow: 0 8px 30px rgba(66,52,36,.07); }
+    .label { font-weight: 800; color: #a45131; font-size: 18px; letter-spacing: .12em; }
+    .text { margin-top: 7px; font-size: 24px; line-height: 1.45; color: #283d36; }
+    .footer { position: absolute; left: 88px; bottom: 52px; font-size: 18px; color: #786e62; }
+    .footer strong { color: #24483e; }
+  </style>
+</head>
+<body>
+  <main class="card" id="card">
+    <div class="shade"></div>
+    <section class="content">
+      <div class="brand">CLIO MEMORY</div>
+      <div class="badge" id="badge"></div>
+      <h1 id="title"></h1>
+      <p class="lead" id="lead"></p>
+      <div class="row"><div class="label">以前</div><div class="text" id="before"></div></div>
+      <div class="row"><div class="label">现在多了</div><div class="text" id="now"></div></div>
+      <div class="row"><div class="label">带来的帮助</div><div class="text" id="help"></div></div>
+    </section>
+    <div class="footer"><strong>2.0.0</strong> · 记忆与养育室底层能力大升级</div>
+  </main>
+  <script>
+    const cards = {
+      1: { bg:'01-overview-background.png', badge:'01 · 整体升级', title:'从记住，走向接续', lead:'2.0 不只是多存几条记忆，而是让散开的信息真正连起来。', before:'记忆主要以单独条目存在，彼此之间的前后关系不够清楚。', now:'时间线、人物关系、当前状态和养育室进入同一条连续链路。', help:'AI 打开新窗口后，更容易知道发生过什么、后来怎样，以及现在该从哪里继续。' },
+      2: { bg:'02-continuity-background.png', badge:'02 · 连续事件摘要', title:'六封信，讲成一件事', lead:'重复的内容不再反复朗读，真正的变化仍然会被保留下来。', before:'开机时容易把每封信的开头依次展示，相同事情可能重复出现。', now:'读取最近六封信，按时间去重、合并，并保留事件前后的变化。', help:'得到的是一段连贯近况，不是六段碎片；既更短，也更容易理解事情的发展。' },
+      3: { bg:'03-linkage-background.png', badge:'03 · 关系与状态联动', title:'一条记忆，牵动后来', lead:'被写下的事情开始影响人物关系、此刻状态与自我觉察。', before:'事件、关系温度和当前感受彼此较独立，变化容易停在记录层。', now:'新增人物关系主题、来源证据、时间线变化和自我觉察候选。', help:'系统能说明“为什么会有这个状态”，关系温度也由真实事件推动，而不是总在固定范围浮动。' },
+      4: { bg:'04-nursery-background.png', badge:'04 · 养育室', title:'先好好说话，再安静记录', lead:'孩子的自然回复与后台判断已经分开，不再被一张严格格式表卡住。', before:'回复和状态表绑在一起；格式不合格时，孩子可能直接没有回应。', now:'孩子先用自然中文回复，后台再单独抓取情绪和已经完成的照顾行为。', help:'聊天失败率更低；后台判断失败也不会吞掉回复，提议和疑问不会被误记成已经照顾完成。' },
+      5: { bg:'05-roadmap-background.png', badge:'05 · 当前完成度', title:'底层已升级，界面还会继续', lead:'这一版先把真正影响记忆连续性和使用稳定性的部分做好。', before:'手机聊天输入位置、滚动和首页层级存在明显问题。', now:'主要手机问题已经修复，电脑端和手机端目前都能使用。', help:'现在可以先下载体验；完整 UI 视觉和操作重做会作为下一版本的重点，不把未完成的界面说成成品。' }
+    };
+    const id = new URLSearchParams(location.search).get('card') || '1';
+    const data = cards[id] || cards[1];
+    document.getElementById('card').style.backgroundImage = `url('${data.bg}')`;
+    for (const key of ['badge','title','lead','before','now','help']) document.getElementById(key).textContent = data[key];
+  </script>
+</body>
+</html>
