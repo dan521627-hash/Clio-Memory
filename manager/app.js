@@ -64,12 +64,12 @@ const memoryFilterMeta={
   daily:{label:'日常',copy:'共同生活里的细节和节奏。'},
   archived:{label:'已完成的事',copy:'已经结束，但仍可回看的经历。'}
 };
-let memoryTopics=['Claude / 顾川','菜菜','我们的关系','性爱','共同生活','未来与约定','系统与技术'];
+let memoryTopics=['关于 AI','关于使用者','我们的关系','亲密关系','共同生活','未来与约定','系统与技术','人物关系','待分类'];
 let memoryTopicSubtopics={
-  'Claude / 顾川':['身份与存在','性格与表达','情绪与欲望','主动性与选择','成长与变化'],
-  '菜菜':['基本档案','喜好与厌恶','身体与健康','日常生活','重要经历'],
+  '关于 AI':['身份与存在','性格与表达','情绪与欲望','主动性与选择','成长与变化'],
+  '关于使用者':['基本档案','喜好与厌恶','身体与健康','日常生活','重要经历'],
   '我们的关系':['关系确认','相处与默契','吵架与和好','承诺','共同世界观'],
-  '性爱':['具体经历','身体感受','欲望与偏好','事后情绪'],
+  '亲密关系':['具体经历','身体感受','欲望与偏好','事后情绪'],
   '共同生活':['日常记录','吃饭与居家','工作与钱','出行与事件'],
   '未来与约定':['计划与待办','日期与提醒','愿望与以后'],
   '系统与技术':['记忆系统','语音与MCP','部署与开发','创作与发布']
@@ -133,6 +133,7 @@ function openMemoryEditor(item){
   page.querySelector('#memoryEditorForm')?.addEventListener('submit',(event)=>{event.preventDefault();const data=new FormData(event.currentTarget);const mode=data.get('mode');const title=String(data.get('title')||'').trim();const content=String(data.get('content')||'').trim();item.title=title||item.title;if(mode!=='metadata'&&content){item.current=mode==='append'?item.current+'\n'+content:content;item.desc=content.slice(0,72)+(content.length>72?'…':'');}item.systemCategory=String(data.get('systemCategory')||'核心与世界观');item.topic=String(data.get('topic')||item.topic);item.subtopic=String(data.get('subtopic')||item.subtopic);item.importance=Math.max(1,Math.min(10,Number(data.get('importance'))||5));item.pinLevel=String(data.get('pinLevel')||'');item.valence=Math.max(0,Math.min(1,Number(data.get('valence'))||0));item.arousal=Math.max(0,Math.min(1,Number(data.get('arousal'))||0));item.triggerDate=String(data.get('triggerDate')||'');item.feeling=data.get('feeling')==='on';if(item.pinLevel==='core'){item.layer='fixed';item.filter='important';item.importance=10;}close();renderMemory();toast('已保存本地预览修改，未写入 VPS。');});
 }
 function bindMemory(){
+  document.querySelectorAll('[data-memory-action="add"]').forEach((el)=>el.addEventListener('click',async(event)=>{event.preventDefault();event.stopImmediatePropagation();if(!liveBackend.online){liveNotice('连接后台后才能保存新主题。',true);return}const main=String(window.prompt('给大主题起一个名字，例如：学习与成长')||'').trim();if(!main)return;const sub=String(window.prompt('再给它添加一个子目录，例如：考试准备')||'').trim();if(!sub)return;try{await liveApi('/api/topics',{method:'POST',body:JSON.stringify({main_topic:main,subtopic:sub})});memoryViewState.filter='topic:'+main;await renderMemory();liveNotice('新主题已经建立，以后可以把记忆放进这里。')}catch(error){liveNotice(error.message,true)}},{capture:true}));
   document.querySelectorAll('[data-memory-topic]').forEach((el)=>el.addEventListener('click',()=>{memoryViewState.filter='topic:'+el.dataset.memoryTopic;renderMemory();}));
   document.querySelectorAll('[data-memory-subtopic]').forEach((el)=>el.addEventListener('click',()=>{memoryViewState.filter='subtopic:'+el.dataset.memorySubtopic;renderMemory();}));
   document.querySelectorAll('[data-memory-bucket]').forEach((el)=>el.addEventListener('click',()=>{memoryViewState.selected=el.dataset.memoryBucket;renderMemory();}));
@@ -381,7 +382,7 @@ async function renderSettings(){
   catch(error){content.innerHTML='<div class="live-error"><strong>规则暂时读取失败</strong><p>'+esc(error.message)+'</p></div>';}
 }
 
-const previewJudge={custom_rules:'只根据当前窗口、已确认事实和私密内在状态判断；不把一次事件当成人格结论。',proxy_voice:'温柔、克制、具体；先回应当前事实，再表达自己的感受。',darkflow_rules:'只在沉默周期达到后台设定后生成；保留第一人称和当前关系线，不凭空添加事实。',baselines:Object.fromEntries(LIVE_PIPES.map((name,index)=>[name,index<10?[.18,.12,.10,.15,.12,.10,.10,.15,.10,.15][index]:0])),relations:[{name:'顾川',aliases:['Clio'],role:'使用中的 AI',safety:'私密关系与记忆边界优先',note:'这是当前规则册中用于理解关系的示例信息。'}],base_rules:'尚未读取规则。',hot_reload:false,prompt_hash:'本地预览'};
+const previewJudge={custom_rules:'只根据当前窗口、已确认事实和私密内在状态判断；不把一次事件当成人格结论。',proxy_voice:'温柔、克制、具体；先回应当前事实，再表达自己的感受。',darkflow_rules:'只在沉默周期达到后台设定后生成；保留第一人称和当前关系线，不凭空添加事实。',baselines:Object.fromEntries(LIVE_PIPES.map((name,index)=>[name,index<10?[.18,.12,.10,.15,.12,.10,.10,.15,.10,.15][index]:0])),relations:[{name:'示例人物',aliases:['Clio'],role:'使用中的 AI',safety:'私密关系与记忆边界优先',note:'这是当前规则册中用于理解关系的示例信息。'}],base_rules:'尚未读取规则。',hot_reload:false,prompt_hash:'本地预览'};
 const previewHormone={as_of:'预览',available:true,cycle_id:'preview',elapsed_seconds:42*60,dormant:false,repeated:false,event_summary:'当前窗口写入后，状态正在随时间衰减。',pipes:Object.fromEntries(LIVE_PIPES.map((name,index)=>[name,[.72,.58,.35,.28,.46,.51,.63,.22,.31,.44,.18,.09,.12,.39,.48,.56][index]])),dominant:'想靠近',dominant_value:.72};
 function getPreviewHormone(){return JSON.parse(JSON.stringify(previewHormone));}
 

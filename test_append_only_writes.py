@@ -33,12 +33,12 @@ class AppendOnlyWriteTests(unittest.IsolatedAsyncioTestCase):
     async def test_create_and_trace_append_preserve_exact_source_and_snapshot(self):
         with tempfile.TemporaryDirectory() as root:
             manager = BucketManager(make_config(root))
-            original = "顾川今天说了原话。\n末尾空格要留住  "
+            original = "使用者今天说了原话。\n末尾空格要留住  "
             bucket_id = await manager.create(
                 content=original,
                 name="exact-source",
-                tags=["顾川"],
-                domain=["顾川"],
+                tags=["示例人物"],
+                domain=["示例人物"],
             )
             self.assertEqual((await manager.get(bucket_id))["content"], original)
             self.assertNotIn("[[", (await manager.get(bucket_id))["content"])

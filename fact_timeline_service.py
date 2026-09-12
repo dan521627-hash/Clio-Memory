@@ -1,4 +1,4 @@
-"""Detect possible dated fact changes without writing confirmed facts."""
+"""Detect and record dated fact changes from successful memory writes."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ logger = logging.getLogger("ombre_brain.fact_timeline")
 
 
 class FactTimelineService:
-    """Use the configured evaluator to create human-reviewable candidates."""
+    """Use the configured evaluator to extend factual timelines automatically."""
 
     def __init__(
         self, config: dict, evaluator, store: FactTimelineStore, bucket_manager=None
@@ -147,6 +147,7 @@ class FactTimelineService:
         try:
             extracted = await self._extract(normalized, await self._current_facts())
             saved = []
+            versions = []
             for item in extracted:
                 try:
                     confidence = float(item.get("confidence", 0))
@@ -169,6 +170,20 @@ class FactTimelineService:
                         "event_key": event_key,
                     }
                 )
+                if candidate.get("status") == "pending":
+                    version = await self.store.record(
+                        fact=candidate["fact_label"],
+                        value=candidate["proposed_value"],
+                        effective_date=candidate["effective_date"],
+                        source_bucket_id=candidate["source_bucket_id"],
+                        source_type=candidate["source_type"],
+                        source_ref=candidate["source_ref"],
+                        source_excerpt=candidate["source_excerpt"],
+                    )
+                    candidate = await self.store.resolve_candidate(
+                        candidate["candidate_id"], "confirmed"
+                    )
+                    versions.append(version)
                 saved.append(candidate)
             await self.store.save_event(
                 event_key,
@@ -179,7 +194,7 @@ class FactTimelineService:
                     [item.get("candidate_id") for item in saved], ensure_ascii=False
                 ),
             )
-            return {"status": "applied", "candidates": saved}
+            return {"status": "applied", "candidates": saved, "versions": versions}
         except Exception as error:
             logger.warning("Fact detection failed after %s write: %s", source_type, error)
             await self.store.save_event(

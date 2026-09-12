@@ -1,5 +1,7 @@
 # Anima 2.0 升级说明
 
+> 2026-09-12 修正：公开包的默认主题已全部改为通用称呼；网页和手机现在可以自行新增主题。新记忆会进入内容对应的主题，无法可靠判断时进入“待分类”，不再只按标签展示。写入中识别出的明确事实变化会直接续写时间线，不再等待人工确认。
+
 <img src="https://raw.githubusercontent.com/dan521627-hash/Clio-Memory/v2.0.0/docs/images/v2.0/mobile/01-mobile.png" alt="从记住走向接续" width="540">
 
 ## 为什么是 2.0

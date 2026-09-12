@@ -467,7 +467,7 @@ class BehaviorServiceTests(unittest.IsolatedAsyncioTestCase):
             evaluator = SkippingBehaviorEvaluator()
             service = BehaviorService(config(root), evaluator)
             contexts = [
-                {"context_card": "菜菜说她要出去了，刚准备出门，到了会再说。"}
+                {"context_card": "使用者说她要出去了，刚准备出门，到了会再说。"}
             ]
             event = {
                 "status": "applied",
@@ -706,7 +706,7 @@ class BehaviorServiceTests(unittest.IsolatedAsyncioTestCase):
                 "status": "applied",
                 "event_id": 42,
                 "cycle_id": 20,
-                "context_card": "菜菜已经到家了，事情结束了。",
+                "context_card": "使用者已经到家了，事情结束了。",
             }
             state = {
                 "cycle_id": 20,

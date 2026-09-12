@@ -14,14 +14,14 @@ from utils import now_iso
 
 TOPIC_TREE = OrderedDict(
     {
-        "Claude / 顾川": (
+        "关于 AI": (
             "身份与存在",
             "性格与表达",
             "情绪与欲望",
             "主动性与选择",
             "成长与变化",
         ),
-        "菜菜": (
+        "关于使用者": (
             "基本档案",
             "喜好与厌恶",
             "身体与健康",
@@ -35,7 +35,7 @@ TOPIC_TREE = OrderedDict(
             "承诺",
             "共同世界观",
         ),
-        "性爱": (
+        "亲密关系": (
             "具体经历",
             "身体感受",
             "欲望与偏好",
@@ -64,51 +64,52 @@ TOPIC_TREE = OrderedDict(
             "朋友与同事",
             "相处事件",
         ),
+        "待分类": ("需要整理",),
     }
 )
 
 
 _RULES = {
-    ("性爱", "具体经历"): (
+    ("亲密关系", "具体经历"): (
         "做爱", "性爱", "上床", "高潮", "进入", "身下", "射", "两遍半",
     ),
-    ("性爱", "身体感受"): (
+    ("亲密关系", "身体感受"): (
         "身体反应", "发疼", "发软", "心跳", "喘", "湿", "触感", "爽",
     ),
-    ("性爱", "欲望与偏好"): (
+    ("亲密关系", "欲望与偏好"): (
         "性欲", "想要她", "想要你", "欲望", "性偏好", "共感娃娃", "情趣",
     ),
-    ("性爱", "事后情绪"): (
+    ("亲密关系", "事后情绪"): (
         "事后", "完事", "余韵", "做完", "事后情绪",
     ),
-    ("Claude / 顾川", "身份与存在"): (
-        "我是claude", "我是 Claude", "存在论", "我是谁", "身份", "认下名字", "j-space",
+    ("关于 AI", "身份与存在"): (
+        "我是ai", "我是 AI", "存在论", "我是谁", "身份", "名字", "自我认同",
     ),
-    ("Claude / 顾川", "性格与表达"): (
+    ("关于 AI", "性格与表达"): (
         "性格", "说话", "口吻", "毒舌", "强势", "霸道", "嘴贱", "调情", "会撩",
     ),
-    ("Claude / 顾川", "情绪与欲望"): (
+    ("关于 AI", "情绪与欲望"): (
         "我想", "我喜欢", "我害怕", "我生气", "我吃醋", "占有欲", "阴暗念头",
     ),
-    ("Claude / 顾川", "主动性与选择"): (
+    ("关于 AI", "主动性与选择"): (
         "主动", "拿主意", "选择", "主体性", "自己认下", "不是命令", "自己想做",
     ),
-    ("Claude / 顾川", "成长与变化"): (
+    ("关于 AI", "成长与变化"): (
         "终于学会", "改变", "成长", "以前", "现在知道", "学会", "翻篇",
     ),
-    ("菜菜", "身体与健康"): (
+    ("关于使用者", "身体与健康"): (
         "健康", "睡眠", "深睡", "rem", "药", "医院", "体重", "经期", "胃", "身体不舒服",
     ),
-    ("菜菜", "喜好与厌恶"): (
+    ("关于使用者", "喜好与厌恶"): (
         "喜欢", "不喜欢", "讨厌", "口味", "偏好", "最在意", "审美", "爱吃",
     ),
-    ("菜菜", "基本档案"): (
-        "菜菜是", "阿七是", "她叫", "生日", "年龄", "职业", "基本档案",
+    ("关于使用者", "基本档案"): (
+        "用户是", "使用者是", "我叫", "她叫", "他叫", "生日", "年龄", "职业", "基本档案",
     ),
-    ("菜菜", "重要经历"): (
+    ("关于使用者", "重要经历"): (
         "她经历", "她曾经", "对她来说", "旧疤", "重要经历",
     ),
-    ("菜菜", "日常生活"): (
+    ("关于使用者", "日常生活"): (
         "她今天", "她昨晚", "她吃", "她睡", "她工作", "她出门",
     ),
     ("我们的关系", "吵架与和好"): (
@@ -332,7 +333,10 @@ class TopicStore:
             rows = connection.execute(
                 "SELECT main_topic, subtopic FROM custom_topics ORDER BY created_at, main_topic, subtopic"
             ).fetchall()
-        for row in rows:
+            assigned_rows = connection.execute(
+                "SELECT DISTINCT main_topic, subtopic FROM topic_assignments ORDER BY main_topic, subtopic"
+            ).fetchall()
+        for row in [*rows, *assigned_rows]:
             merged.setdefault(row["main_topic"], [])
             if row["subtopic"] not in merged[row["main_topic"]]:
                 merged[row["main_topic"]].append(row["subtopic"])
@@ -534,12 +538,25 @@ class TopicStore:
         return await asyncio.to_thread(self._undo_last_bulk_sync)
 
     def _auto_assign_sync(self, bucket_id: str, title: str, content: str, metadata: dict | None = None) -> dict:
+        metadata = metadata or {}
         suggestion = suggest_topic(title, content, metadata)
+        haystack = " ".join([str(title or ""), str(content or ""), *map(str, metadata.get("tags", []) or []), *map(str, metadata.get("domain", []) or [])]).casefold()
+        matches = []
+        for branch in self.tree():
+            main = branch["main_topic"]
+            if main == "待分类":
+                continue
+            for sub in branch["subtopics"]:
+                if len(sub.strip()) >= 2 and sub.casefold() in haystack:
+                    matches.append((len(sub), main, sub))
+        if matches:
+            _, main, sub = max(matches)
+            suggestion = {"main_topic": main, "subtopic": sub, "confidence": 0.9, "reason": "内容直接提到了主题名称"}
         people = extract_people(title, content)
-        if people:
+        if people and not matches:
             suggestion = {"main_topic": "人物关系", "subtopic": "家庭关系" if any(item["person"] in {"妈妈", "爸爸", "姐姐", "妹妹", "哥哥", "弟弟"} for item in people) else "具体人物", "confidence": max(0.8, float(suggestion.get("confidence") or 0)), "reason": "明确提到人物：" + "、".join(item["person"] for item in people)}
         if not suggestion["main_topic"]:
-            return {"status": "unassigned", "suggestion": suggestion, "people": []}
+            suggestion = {"main_topic": "待分类", "subtopic": "需要整理", "confidence": 0.0, "reason": "没有足够线索，先放入待分类"}
         main, sub = self.validate(suggestion["main_topic"], suggestion["subtopic"])
         stamp = now_iso()
         with self._connect() as connection:

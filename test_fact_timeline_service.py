@@ -43,7 +43,7 @@ class FactTimelineServiceTests(unittest.IsolatedAsyncioTestCase):
             }
         )
 
-    async def test_detection_creates_candidate_without_writing_fact(self):
+    async def test_detection_writes_fact_without_waiting_for_confirmation(self):
         with tempfile.TemporaryDirectory() as root:
             store = self.make_store(root)
             evaluator = FakeEvaluator(
@@ -67,10 +67,9 @@ class FactTimelineServiceTests(unittest.IsolatedAsyncioTestCase):
             )
 
             self.assertEqual(result["status"], "applied")
-            self.assertEqual(store.count(), 0)
-            candidates = await store.list_candidates()
-            self.assertEqual(len(candidates), 1)
-            self.assertEqual(candidates[0]["proposed_value"], "2026-08-20")
+            self.assertEqual(store.count(), 1)
+            self.assertEqual(await store.list_candidates(), [])
+            self.assertEqual(result["versions"][0]["fact_value"], "2026-08-20")
 
     async def test_confirm_mailbox_candidate_writes_version_and_ignore_does_not(self):
         with tempfile.TemporaryDirectory() as root:
